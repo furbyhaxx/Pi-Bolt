@@ -189,6 +189,11 @@ export interface SettingsManagerCreateOptions {
 	projectTrusted?: boolean;
 }
 
+/** An immutable captured settings state that creates independent detached managers. */
+export interface SettingsManagerSnapshot {
+	createManager(): SettingsManager;
+}
+
 export interface SettingsStorage {
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
 	/** What withLock() would hand its callback, for a caller that only reads. Optional: withLock() is used without it. */
@@ -202,6 +207,16 @@ export interface SettingsError {
 }
 
 type SettingsPaths = Partial<Record<SettingsScope, string>>;
+
+type SettingsSnapshotState = {
+	globalSettings: Settings;
+	projectSettings: Settings;
+	settings: Settings;
+	packageSettings: Settings;
+	projectTrusted: boolean;
+	settingsPaths: SettingsPaths;
+	packageBaseDirs: Record<SettingsScope, string>;
+};
 
 function toSettingsError(scope: SettingsScope, error: unknown, path?: string): SettingsError {
 	return {
@@ -468,6 +483,8 @@ export class SettingsManager {
 	private writeQueue: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
 	private settingsPaths: SettingsPaths;
+	private detachedSnapshot = false;
+	private snapshotPackageBaseDirs?: Record<SettingsScope, string>;
 
 	private constructor(
 		storage: SettingsStorage,
@@ -545,6 +562,50 @@ export class SettingsManager {
 		const initialSettings = SettingsManager.migrateSettings(structuredClone(settings) as Record<string, unknown>);
 		storage.withLock("global", () => JSON.stringify(initialSettings, null, 2));
 		return SettingsManager.fromStorage(storage, options);
+	}
+
+	/** Capture the current resolution state without reading or writing its storage. */
+	createSnapshot(): SettingsManagerSnapshot {
+		return SettingsManager.snapshotFromState(
+			structuredClone({
+				globalSettings: this.globalSettings,
+				projectSettings: this.projectSettings,
+				settings: this.settings,
+				packageSettings: this.packageSettings,
+				projectTrusted: this.projectTrusted,
+				settingsPaths: this.settingsPaths,
+				packageBaseDirs: {
+					global: resolvePath(this.getPackageBaseDir("global")),
+					project: resolvePath(this.getPackageBaseDir("project")),
+				},
+			}),
+		);
+	}
+
+	private static snapshotFromState(captured: SettingsSnapshotState): SettingsManagerSnapshot {
+		return Object.freeze({
+			createManager(): SettingsManager {
+				const state = structuredClone(captured);
+				const storage = new InMemorySettingsStorage();
+				storage.withLock("global", () => JSON.stringify(state.globalSettings));
+				storage.withLock("project", () => JSON.stringify(state.projectSettings));
+				const manager = new SettingsManager(
+					storage,
+					state.globalSettings,
+					state.projectSettings,
+					null,
+					null,
+					[],
+					state.projectTrusted,
+					state.settingsPaths,
+				);
+				manager.settings = state.settings;
+				manager.packageSettings = state.packageSettings;
+				manager.detachedSnapshot = true;
+				manager.snapshotPackageBaseDirs = state.packageBaseDirs;
+				return manager;
+			},
+		});
 	}
 
 	private static loadFromStorage(
@@ -715,6 +776,8 @@ export class SettingsManager {
 
 	async reload(): Promise<void> {
 		await this.writeQueue;
+		// Re-merging detached settings would discard captured runtime overrides.
+		if (this.detachedSnapshot) return;
 		const globalLoad = SettingsManager.tryLoadFromStorage(this.storage, "global", this.settingsPaths);
 		if (!globalLoad.error) {
 			this.globalSettings = globalLoad.settings;
@@ -1348,6 +1411,10 @@ export class SettingsManager {
 		return this.globalSettings.deviceId;
 	}
 
+	private getPackageBaseDir(scope: SettingsScope): string {
+		return this.snapshotPackageBaseDirs?.[scope] ?? getPackageBaseDir(scope, this.settingsPaths);
+	}
+
 	/** As in Pi, a project `packages` list replaces the global one. A project Pi-Bolt list alone does not. */
 	private getPackageSettingsScope(): SettingsScope {
 		return this.projectSettings.packages !== undefined ? "project" : "global";
@@ -1369,10 +1436,7 @@ export class SettingsManager {
 		// identity, as the package manager loads them; their exclusions apply only to the project's own (empty) list.
 		const project = this.resolvePackages(this.projectSettings, "project");
 		const identity = (entry: PackageSource, entryScope: SettingsScope) =>
-			getPackageIdentity(
-				typeof entry === "string" ? entry : entry.source,
-				getPackageBaseDir(entryScope, this.settingsPaths),
-			);
+			getPackageIdentity(typeof entry === "string" ? entry : entry.source, this.getPackageBaseDir(entryScope));
 		const projectIdentities = new Set(project.map((entry) => identity(entry, "project")));
 		return [...packages.filter((entry) => !projectIdentities.has(identity(entry, "global"))), ...project];
 	}
@@ -1399,10 +1463,9 @@ export class SettingsManager {
 		if (PIBOLT !== undefined) {
 			// A file written by an older Pi-Bolt since this manager loaded it still holds a legacy copy.
 			persisted =
-				(withLegacyPiBoltPackagesConverted(
-					persisted as Record<string, unknown>,
-					getPackageBaseDir(scope, this.settingsPaths),
-				) as Settings | undefined) ?? persisted;
+				(withLegacyPiBoltPackagesConverted(persisted as Record<string, unknown>, this.getPackageBaseDir(scope)) as
+					| Settings
+					| undefined) ?? persisted;
 		}
 		const current = scope === "project" ? this.projectSettings : this.globalSettings;
 		const modified = scope === "project" ? this.modifiedProjectFields : this.modifiedFields;
@@ -1417,7 +1480,7 @@ export class SettingsManager {
 
 	private resolvePackages(settings: Settings, scope: SettingsScope, baseDir?: string): PackageSource[] {
 		const shared = settings.packages ?? [];
-		baseDir ??= getPackageBaseDir(scope, this.settingsPaths);
+		baseDir ??= this.getPackageBaseDir(scope);
 		const own = Array.isArray(settings.piBolt?.packages) ? settings.piBolt.packages : [];
 		return structuredClone(PIBOLT === undefined ? shared : resolvePackageOverlay(shared, own, baseDir));
 	}

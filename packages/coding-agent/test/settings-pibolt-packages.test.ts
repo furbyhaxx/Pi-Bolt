@@ -15,6 +15,7 @@ import { CONFIG_DIR_NAME, ENV_AGENT_DIR } from "../src/config.ts";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import {
+	FileSettingsStorage,
 	InMemorySettingsStorage,
 	type PackageSource,
 	type Settings,
@@ -114,6 +115,135 @@ afterEach(() => {
 	vi.unstubAllEnvs();
 	vi.restoreAllMocks();
 	rmSync(root, { recursive: true, force: true });
+});
+
+describe("settings snapshots", () => {
+	test("isolates layered settings, runtime overrides, package bases and clone writes", async () => {
+		const globalOverlay = { source: "../agent/shared", extensions: ["global.ts"] };
+		const projectOverlay = { source: "../../agent/shared", skills: ["project"] };
+		const runtimeOverlay = { source: "../agent/shared", extensions: ["runtime.ts"] };
+		writeSettings(
+			{
+				theme: "global",
+				packages: ["./shared", "./global-only"],
+				piBolt: { packages: [globalOverlay] },
+				defaultTools: ["read"],
+				thinkingBudgets: { low: 100 },
+			},
+			{ theme: "project", piBolt: { packages: [projectOverlay, "./project-only"] }, defaultTools: ["+bash"] },
+		);
+		const reads = vi.spyOn(FileSettingsStorage.prototype, "read");
+		const locks = vi.spyOn(FileSettingsStorage.prototype, "withLock");
+		const { settings } = manager();
+		settings.applyOverrides({
+			theme: "runtime",
+			packages: ["./shared", "./runtime"],
+			piBolt: { packages: [runtimeOverlay] },
+			defaultTools: ["+edit"],
+			enabledModels: ["runtime-model"],
+			thinkingBudgets: { high: 200 },
+		});
+		const captured = {
+			global: settings.getGlobalSettings(),
+			project: settings.getProjectSettings(),
+			effective: settings.getSettings(),
+			packages: settings.getPackages(),
+		};
+		expect(captured.packages).toEqual(["./runtime", projectOverlay, "./project-only"]);
+		const readCount = reads.mock.calls.length;
+		const lockCount = locks.mock.calls.length;
+		const snapshot = settings.createSnapshot();
+		expect(Object.isFrozen(snapshot)).toBe(true);
+		expect(Object.keys(snapshot)).toEqual(["createManager"]);
+		const first = snapshot.createManager();
+		const second = snapshot.createManager();
+
+		writeSettings({ theme: "changed-on-disk", packages: ["npm:changed"] }, { theme: "changed-project" });
+		settings.applyOverrides({ theme: "changed-source", packages: ["npm:source-only"], enabledModels: ["source"] });
+		vi.stubEnv(ENV_AGENT_DIR, join(root, "different-agent"));
+		process.chdir(root);
+
+		await second.reload();
+		expect(second.isProjectTrusted()).toBe(true);
+		expect(second.getGlobalSettings()).toEqual(captured.global);
+		expect(second.getProjectSettings()).toEqual(captured.project);
+		expect(second.getSettings()).toEqual(captured.effective);
+		expect(second.getDefaultTools()).toEqual(["read", "bash", "edit"]);
+		expect(second.getPackages()).toEqual(captured.packages);
+		expect(second.getResolvedPackages("global")).toEqual([globalOverlay, "./global-only"]);
+		expect(second.getResolvedPackages("project")).toEqual([projectOverlay, "./project-only"]);
+		expect(await second.getCurrentPackageSettings("global")).toEqual({
+			packages: captured.global.packages,
+			piBolt: { packages: captured.global.piBolt?.packages },
+		});
+
+		first.getEnabledModels()?.push("clone-only");
+		const budgets = first.getThinkingBudgets();
+		if (budgets) budgets.high = 999;
+		first.setPackages(["npm:clone-only"]);
+		first.setProjectPackages(["npm:clone-project"]);
+		await first.flush();
+		expect(settings.getTheme()).toBe("changed-source");
+		expect(second.getSettings()).toEqual(captured.effective);
+		const third = snapshot.createManager();
+		expect(third.getSettings()).toEqual(captured.effective);
+		expect(third.getGlobalSettings()).toEqual(captured.global);
+		expect(third.getProjectSettings()).toEqual(captured.project);
+		expect(third.getPackages()).toEqual(captured.packages);
+		expect(reads.mock.calls).toHaveLength(readCount);
+		expect(locks.mock.calls).toHaveLength(lockCount);
+	});
+
+	test("never restores untrusted project content, even if a clone becomes trusted", async () => {
+		writeSettings({ theme: "global", packages: ["npm:global"] }, { theme: "untrusted", packages: ["npm:project"] });
+		const reads = vi.spyOn(FileSettingsStorage.prototype, "read");
+		const locks = vi.spyOn(FileSettingsStorage.prototype, "withLock");
+		const { settings } = manager(false);
+		const readCount = reads.mock.calls.length;
+		const lockCount = locks.mock.calls.length;
+		const snapshot = settings.createSnapshot();
+		const clone = snapshot.createManager();
+		expect(clone.isProjectTrusted()).toBe(false);
+		expect(clone.getProjectSettings()).toEqual({});
+		expect(clone.getTheme()).toBe("global");
+		clone.setProjectTrusted(true);
+		await clone.reload();
+		expect(clone.getProjectSettings()).toEqual({});
+		expect(clone.getPackages()).toEqual(["npm:global"]);
+		expect(snapshot.createManager().isProjectTrusted()).toBe(false);
+		expect(reads.mock.calls).toHaveLength(readCount);
+		expect(locks.mock.calls).toHaveLength(lockCount);
+	});
+
+	test("captures fallback package bases for custom storage", () => {
+		const storage = new InMemorySettingsStorage();
+		const globalOverlay = { source: "./shared", extensions: [] };
+		const projectOverlay = { source: "./project-tool", skills: [] };
+		storage.withLock("global", () =>
+			JSON.stringify({
+				packages: [join(agentDir, "shared")],
+				piBolt: { packages: [globalOverlay], packagesOverlay: true },
+			}),
+		);
+		storage.withLock("project", () =>
+			JSON.stringify({
+				packages: [join(cwd, CONFIG_DIR_NAME, "project-tool")],
+				piBolt: { packages: [projectOverlay], packagesOverlay: true },
+			}),
+		);
+		const locks = vi.spyOn(storage, "withLock");
+		const settings = SettingsManager.fromStorage(storage);
+		const lockCount = locks.mock.calls.length;
+		const snapshot = settings.createSnapshot();
+		vi.stubEnv(ENV_AGENT_DIR, join(root, "different-agent"));
+		process.chdir(root);
+		const clone = snapshot.createManager();
+		expect(clone.getResolvedPackages("global")).toEqual([globalOverlay]);
+		expect(clone.getResolvedPackages("project")).toEqual([projectOverlay]);
+		expect(clone.getResolvedPackages("global", root)).toHaveLength(2);
+		expect(clone.createSnapshot().createManager().getResolvedPackages("project")).toEqual([projectOverlay]);
+		expect(locks.mock.calls).toHaveLength(lockCount);
+	});
 });
 
 // #28: exercise raw settings, the real resolver, configuration writes and CLI dispatch without network installs.

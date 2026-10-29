@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "../src/core/http-dispatcher.ts";
-import { type Settings, SettingsManager } from "../src/core/settings-manager.ts";
+import { InMemorySettingsStorage, type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 
 describe("SettingsManager", () => {
 	const testDir = join(process.cwd(), "test-settings-tmp");
@@ -213,6 +213,56 @@ describe("SettingsManager", () => {
 
 			expect(manager.getTheme()).toBe("dark");
 			expect(manager.drainErrors()).toMatchObject([{ scope: "global", path: settingsPath }]);
+		});
+	});
+
+	describe("snapshot", () => {
+		it("retains layered settings and runtime overrides across detached reloads and mutations", async () => {
+			const storage = new InMemorySettingsStorage();
+			storage.withLock("global", () => JSON.stringify({ theme: "global", enabledModels: ["global"] }));
+			storage.withLock("project", () => JSON.stringify({ theme: "project", extensions: ["./project.ts"] }));
+			const locks = vi.spyOn(storage, "withLock");
+			const source = SettingsManager.fromStorage(storage);
+			source.applyOverrides({ theme: "runtime", enabledModels: ["runtime"] });
+			const lockCount = locks.mock.calls.length;
+			const snapshot = source.createSnapshot();
+			const first = snapshot.createManager();
+			const second = snapshot.createManager();
+
+			source.applyOverrides({ theme: "changed-source" });
+			first.getEnabledModels()?.push("first-only");
+			first.setProjectExtensionPaths(["./first.ts"]);
+			await first.flush();
+			await second.reload();
+
+			expect(Object.isFrozen(snapshot)).toBe(true);
+			expect(second.getTheme()).toBe("runtime");
+			expect(second.getEnabledModels()).toEqual(["runtime"]);
+			expect(second.getGlobalSettings()).toEqual({ theme: "global", enabledModels: ["global"] });
+			expect(second.getProjectSettings()).toEqual({ theme: "project", extensions: ["./project.ts"] });
+			expect(snapshot.createManager().getSettings()).toEqual(second.getSettings());
+			expect(source.getTheme()).toBe("changed-source");
+			expect(locks.mock.calls).toHaveLength(lockCount);
+		});
+
+		it("captures pending source writes without waiting for or touching the storage", async () => {
+			const storage = new InMemorySettingsStorage();
+			storage.withLock("global", () => JSON.stringify({ theme: "before" }));
+			const locks = vi.spyOn(storage, "withLock");
+			const source = SettingsManager.fromStorage(storage);
+			source.setTheme("pending");
+			const lockCount = locks.mock.calls.length;
+			const snapshot = source.createSnapshot();
+			const clone = snapshot.createManager();
+			expect(locks.mock.calls).toHaveLength(lockCount);
+			expect(clone.getTheme()).toBe("pending");
+
+			await source.flush();
+			source.setTheme("later");
+			await source.flush();
+			await clone.reload();
+			expect(clone.getTheme()).toBe("pending");
+			expect(snapshot.createManager().getTheme()).toBe("pending");
 		});
 	});
 
