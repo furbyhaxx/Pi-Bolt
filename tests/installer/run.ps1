@@ -13,6 +13,9 @@
 # Usage: tests\installer\run.ps1
 $ErrorActionPreference = 'Continue'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$fork = Get-Content -LiteralPath (Join-Path $root 'fork.json') -Raw | ConvertFrom-Json -ErrorAction Stop
+$forkRepository = $fork.repository
+$tagPrefix = $fork.tagPrefix
 $name = 'pi-bolt-win32-x64'
 $work = Join-Path ([IO.Path]::GetTempPath()) "pibolt-installer-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
 $script:status = 0
@@ -23,7 +26,7 @@ $good = Join-Path $work 'good'
 New-Item -ItemType Directory -Force -Path $good | Out-Null
 # (Tried three times: GitHub's API answers a download with an occasional HTTP 500.)
 for ($attempt = 1; $attempt -le 3; $attempt++) {
-	& gh release download --repo opensec-git/Pi-Bolt --dir $good --clobber --pattern SHA256SUMS --pattern SHA256SUMS.sig --pattern "$name.zip"
+	& gh release download --repo $forkRepository --dir $good --clobber --pattern SHA256SUMS --pattern SHA256SUMS.sig --pattern "$name.zip"
 	if ($LASTEXITCODE -eq 0) { break }
 	if ($attempt -eq 3) { exit 1 }
 	Start-Sleep -Seconds 10
@@ -63,7 +66,7 @@ function Invoke-Installer([string]$case, [hashtable]$vars = @{}, [switch]$Again)
 	if (-not $Again) { Remove-Item -LiteralPath $inst -Recurse -Force -ErrorAction SilentlyContinue }
 	$set = @{
 		PIBOLT_DOWNLOAD_BASE = "http://127.0.0.1:$port/$case"; PIBOLT_INSTALL = $inst; PIBOLT_EXTENSIONS = 'no'; PIBOLT_NO_START = '1'
-		PIBOLT_YES = '1'; PIBOLT_NO_PATH = '1'; PIBOLT_VERSION = "bolt-v$version"; PIBOLT_CHANNEL = $null
+		PIBOLT_YES = '1'; PIBOLT_NO_PATH = '1'; PIBOLT_VERSION = "$tagPrefix$version"; PIBOLT_CHANNEL = $null
 	}
 	foreach ($k in $vars.Keys) { $set[$k] = $vars[$k] }
 	$saved = @{}

@@ -18,6 +18,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$PWD
+FORK_CONFIG=$(python3 -c 'import json,sys; config=json.load(open(sys.argv[1])); print(config["repository"] + "\t" + config["tagPrefix"])' "$ROOT/fork.json")
+IFS=$'\t' read -r FORK_REPOSITORY FORK_TAG_PREFIX <<<"$FORK_CONFIG"
+[ -n "$FORK_REPOSITORY" ] && [ -n "$FORK_TAG_PREFIX" ] || { printf 'error: invalid fork.json release configuration\n' >&2; exit 1; }
 case "$(uname -s)-$(uname -m)" in Darwin-*) NAME=pi-bolt-darwin-arm64 ;; *-aarch64) NAME=pi-bolt-linux-arm64 ;; *) NAME=pi-bolt-linux-x64 ;; esac
 WORK=$(mktemp -d)
 SERVER=""
@@ -29,7 +32,7 @@ fail() { printf 'FAIL %s\n' "$1"; status=1; }
 mkdir -p "$WORK/good"
 # (Tried three times: GitHub's API answers a download with an occasional HTTP 500.)
 for attempt in 1 2 3; do
-	gh release download --repo opensec-git/Pi-Bolt --dir "$WORK/good" --clobber --pattern SHA256SUMS --pattern SHA256SUMS.sig \
+	gh release download --repo "$FORK_REPOSITORY" --dir "$WORK/good" --clobber --pattern SHA256SUMS --pattern SHA256SUMS.sig \
 		--pattern "$NAME.tar.gz" --pattern "$NAME.tar.xz" && break
 	[ "$attempt" = 3 ] && exit 1
 	sleep 10
@@ -86,17 +89,17 @@ if ! installed && grep -q "signature does not verify" <<<"$out"; then pass "a pa
 	fail "a page of HTML for the signature: not installed"; printf '%s\n' "$out"; fi
 
 sums_sha=$(if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi <"$WORK/unsigned/SHA256SUMS" | cut -c1-64)
-out=$(install unsigned PIBOLT_VERSION=bolt-v0.5.99)
+out=$(install unsigned PIBOLT_VERSION="${FORK_TAG_PREFIX}0.5.99")
 if ! installed && grep -q "from before Pi-Bolt signed its releases" <<<"$out" && grep -q "PIBOLT_UNVERIFIED=$sums_sha" <<<"$out"; then
 	pass "a release from before signing: not installed, and the SHA-256 to give is said"; else
 	fail "a release from before signing: not installed, and the SHA-256 to give is said"; printf '%s\n' "$out"; fi
 # (An opt-in left in the environment, or one for another download, is not one for this download.)
 for value in 1 "$(printf '%064d' 0)"; do
-	out=$(install unsigned PIBOLT_VERSION=bolt-v0.5.99 PIBOLT_UNVERIFIED="$value")
+	out=$(install unsigned PIBOLT_VERSION="${FORK_TAG_PREFIX}0.5.99" PIBOLT_UNVERIFIED="$value")
 	if ! installed && grep -q "not to this download's SHA-256" <<<"$out"; then pass "a release from before signing, PIBOLT_UNVERIFIED=${value:0:8}...: not installed"; else
 		fail "a release from before signing, PIBOLT_UNVERIFIED=${value:0:8}...: not installed"; printf '%s\n' "$out"; fi
 done
-out=$(install unsigned PIBOLT_VERSION=bolt-v0.5.99 PIBOLT_UNVERIFIED="$sums_sha")
+out=$(install unsigned PIBOLT_VERSION="${FORK_TAG_PREFIX}0.5.99" PIBOLT_UNVERIFIED="$sums_sha")
 if installed && grep -q "WARNING:" <<<"$out"; then pass "a release from before signing, PIBOLT_UNVERIFIED=<its SHA-256>: installed, with a warning"; else
 	fail "a release from before signing, PIBOLT_UNVERIFIED=<its SHA-256>: installed, with a warning"; printf '%s\n' "$out"; fi
 
@@ -131,7 +134,7 @@ if grep -q "an older build" "$inst/$NAME.previous/pi-bolt.txt" 2>/dev/null; then
 	fail "the same build installed again leaves the previous one"; printf '%s\n' "$out"; fi
 
 version=$(head -n 1 "$WORK/good/SHA256SUMS" | sed 's/^# pi-bolt //')
-out=$(install_again good PIBOLT_CHANNEL=beta PIBOLT_VERSION="bolt-v$version")
+out=$(install_again good PIBOLT_CHANNEL=beta PIBOLT_VERSION="${FORK_TAG_PREFIX}$version")
 if [ "$(cat "$inst/channel" 2>/dev/null)" = beta ]; then pass "PIBOLT_CHANNEL=beta is kept for updates"; else
 	fail "PIBOLT_CHANNEL=beta is kept for updates"; printf '%s\n' "$out"; fi
 out=$(install_again good PIBOLT_CHANNEL=stable)

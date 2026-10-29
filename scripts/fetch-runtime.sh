@@ -1,22 +1,35 @@
 #!/usr/bin/env bash
 # Downloads the released Pi-Bolt runtime (instead of building it with build-runtime.sh) to $PIBOLT_WORK/runtime/bun.
 #
-# Usage: scripts/fetch-runtime.sh [--version bolt-vX.Y.Z]     (default: the latest release)
+# Usage: scripts/fetch-runtime.sh [--version <release-tag>] (default: the latest release)
 # Environment: PIBOLT_DOWNLOAD_BASE (a mirror of the release files)
-# The checksums must carry the release key's signature (keys/release.pub), checked with OpenSSL 3 or else with Bun.
+# The checksums must carry the release key's signature, checked with OpenSSL 3 or else with Bun.
 source "$(dirname "$0")/lib/common.sh"
+
+need python3
+FORK_CONFIG="$(python3 -c 'import json,sys; config=json.load(open(sys.argv[1])); print(config["repository"]); print(config["tagPrefix"]); print(config["publicKeyFile"])' "$PIBOLT_ROOT/fork.json")" ||
+	die "could not read fork.json"
+mapfile -t FORK_CONFIG <<<"$FORK_CONFIG"
+[ "${#FORK_CONFIG[@]}" -eq 3 ] || die "invalid fork.json release configuration"
+FORK_REPOSITORY="${FORK_CONFIG[0]}"
+FORK_TAG_PREFIX="${FORK_CONFIG[1]}"
+FORK_PUBLIC_KEY="${FORK_CONFIG[2]}"
 
 TAG=latest
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--version) TAG="$2"; shift ;;
-	-h | --help) sed -n '2,5p' "$0"; exit 0 ;;
+	-h | --help)
+		printf 'Usage: scripts/fetch-runtime.sh [--version %sX.Y.Z] (default: the latest release)\n' "$FORK_TAG_PREFIX"
+		sed -n '5,6p' "$0"
+		exit 0
+		;;
 	*) die "unknown option $1" ;;
 	esac
 	shift
 done
 need curl
-REPO="https://github.com/opensec-git/Pi-Bolt"
+REPO="https://github.com/$FORK_REPOSITORY"
 if [ "$TAG" = latest ]; then BASE="$REPO/releases/latest/download"; else BASE="$REPO/releases/download/$TAG"; fi
 BASE="${PIBOLT_DOWNLOAD_BASE:-$BASE}"
 NAME=pi-bolt-runtime-$PIBOLT_PLATFORM.tar.gz
@@ -45,7 +58,7 @@ log "downloading $BASE/$NAME"
 curl -fL --progress-bar -o "$TMP/$NAME" "$BASE/$NAME"
 curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS"
 curl -fsSL -o "$TMP/SHA256SUMS.sig" "$BASE/SHA256SUMS.sig" || die "no signature at $BASE/SHA256SUMS.sig: the runtime is not used"
-verify_signature "$TMP/SHA256SUMS" "$TMP/SHA256SUMS.sig" "$PIBOLT_ROOT/keys/release.pub"
+verify_signature "$TMP/SHA256SUMS" "$TMP/SHA256SUMS.sig" "$PIBOLT_ROOT/$FORK_PUBLIC_KEY"
 check_sum "$TMP" "$NAME" || die "checksum mismatch for $NAME"
 tar -C "$TMP" -xzf "$TMP/$NAME"
 mkdir -p "$PIBOLT_WORK/runtime"
