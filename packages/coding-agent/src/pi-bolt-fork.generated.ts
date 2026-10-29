@@ -6,7 +6,7 @@ export const PIBOLT_FORK = {
 	tagPrefix: "bolt-v",
 	publicKeyFile: "keys/release.pub",
 	releasePublicKey:
-		"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAoLboJqtKaoISPqffk03vHZr+1sRBG3uIRIWeKOew+aY=\n-----END PUBLIC KEY-----\n",
+		"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAzodky4MEbQ+jm01MeMSXCDplGheTW6nzk7FkrWuzraU=\n-----END PUBLIC KEY-----\n",
 	repositoryUrl: "https://github.com/furbyhaxx/Pi-Bolt",
 	upstreamUrl: "https://github.com/opensec-git/Pi-Bolt",
 	releasesUrl: "https://github.com/furbyhaxx/Pi-Bolt/releases",
