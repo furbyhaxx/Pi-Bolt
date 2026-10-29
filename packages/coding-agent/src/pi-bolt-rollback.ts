@@ -9,7 +9,8 @@ import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import chalk from "chalk";
-import { PIBOLT, PIBOLT_INSTALL_URL, piBoltInstallDir, piBoltInstallMethod, piBoltPackageManager } from "./pi-bolt.ts";
+import { PIBOLT, piBoltInstallDir, piBoltInstallMethod, piBoltPackageManager } from "./pi-bolt.ts";
+import { PIBOLT_FORK } from "./pi-bolt-fork.generated.ts";
 
 /** "Pi-Bolt 0.9.0 (Pi 1.2.0), linux-x64, JIT off, built ..." and what is compiled in, from a build's pi-bolt.txt. */
 function describe(folder: string): string {
@@ -126,25 +127,22 @@ export function rollBackInstallation(
 export function rollbackPiBolt(): number {
 	if (!PIBOLT) return 1;
 	const method = piBoltInstallMethod();
-	if (method === "npm") {
-		console.error(
-			"This Pi-Bolt was installed with the npm package. Install the version you want with the package manager that installed it:",
-		);
-		console.error("  npm install -g pi-bolt@<version>      (the versions: npm view pi-bolt versions)");
-		return 1;
-	}
 	const manager = piBoltPackageManager(method);
 	if (manager?.switchVersion) {
 		console.error(`This Pi-Bolt was installed with ${manager.name}. Switch to another version with ${manager.name}:`);
 		console.error(`  ${manager.switchVersion}`);
 		return 1;
 	}
-	// (Homebrew keeps no build before this one: its formula has the latest release only.)
-	if (manager) {
+	if (method === "npm" || manager) {
+		const windows = method === "scoop" || process.platform === "win32";
+		const tag = `${PIBOLT_FORK.tagPrefix}<version>`;
+		const installer = windows
+			? `$env:PIBOLT_VERSION = "${tag}"; irm ${PIBOLT_FORK.installPs1Url} | iex`
+			: `curl -fsSL ${PIBOLT_FORK.installShUrl} | PIBOLT_VERSION=${tag} sh`;
 		console.error(
-			`This Pi-Bolt was installed with ${manager.name}, which keeps no earlier build to go back to. To run another version, uninstall it and install that version with the installer:`,
+			`This Pi-Bolt was installed with ${manager?.name ?? "the npm package"}. To use another fork version, migrate to the fork's installer:`,
 		);
-		console.error(`  ${manager.uninstall} && curl -fsSL ${PIBOLT_INSTALL_URL} | PIBOLT_VERSION=bolt-v<version> sh`);
+		console.error(`  ${manager ? `${manager.uninstall}${windows ? "; " : " && "}` : ""}${installer}`);
 		return 1;
 	}
 	if (!piBoltInstallDir()) {

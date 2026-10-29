@@ -1,4 +1,13 @@
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -108,19 +117,23 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with Homebrew
 		expect(filesIn(keg)).toEqual(before);
 	});
 
-	it("update --rollback refuses, naming brew", async () => {
+	it("rollback directs Homebrew installations to the fork installer without changing the keg", async () => {
 		const libexec = brewInstall(join(dir, "homebrew"));
 		runningFrom(join(libexec, "pi-bin"));
 		const before = filesIn(keg);
+		const info = readFileSync(join(libexec, "pi-bolt.txt"), "utf8");
 		const error = vi.spyOn(console, "error").mockImplementation(() => {});
 		expect(await handlePackageCommand(["update", "--rollback"])).toBe(true);
 		expect(process.exitCode).toBe(1);
 		const output = error.mock.calls.flat().join("\n");
 		expect(output).toContain("installed with Homebrew (unsupported by this fork)");
+		expect(output).toContain("migrate to the fork's installer");
 		expect(output).toContain(
 			"brew uninstall pi-bolt && curl -fsSL https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.sh | PIBOLT_VERSION=bolt-v<version> sh",
 		);
+		expect(output).not.toContain("keeps no earlier build");
 		expect(filesIn(keg)).toEqual(before);
+		expect(readFileSync(join(libexec, "pi-bolt.txt"), "utf8")).toBe(info);
 	});
 
 	it("compile refuses, naming brew", async () => {

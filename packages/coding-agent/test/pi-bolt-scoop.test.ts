@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -114,16 +114,69 @@ describe("a Pi-Bolt installed with Scoop", () => {
 		expect(filesIn(app)).toEqual(before);
 	});
 
-	it("update --rollback says to switch versions with scoop reset", async () => {
+	it("rollback directs Scoop installations to the fork's PowerShell installer without changing them", async () => {
 		runningFrom(join(scoopInstall(join(dir, "scoop")), "pi-bolt.exe"));
 		const before = filesIn(app);
+		const info = readFileSync(join(app, "1.0.0", "pi-bolt.txt"), "utf8");
 		const error = vi.spyOn(console, "error").mockImplementation(() => {});
 		expect(await handlePackageCommand(["update", "--rollback"])).toBe(true);
 		expect(process.exitCode).toBe(1);
-		expect(error.mock.calls.flat().join("\n")).toContain("installed with Scoop");
-		expect(error.mock.calls.flat().join("\n")).toContain("scoop reset pi-bolt@<version>");
+		const output = error.mock.calls.flat().join("\n");
+		expect(output).toContain("installed with Scoop (unsupported by this fork)");
+		expect(output).toContain("migrate to the fork's installer");
+		expect(output).toContain(
+			'scoop uninstall pi-bolt; $env:PIBOLT_VERSION = "bolt-v<version>"; irm https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.ps1 | iex',
+		);
+		expect(output).not.toContain("scoop reset");
+		expect(output).not.toContain("keeps no earlier build");
 		expect(filesIn(app)).toEqual(before);
+		expect(readFileSync(join(app, "1.0.0", "pi-bolt.txt"), "utf8")).toBe(info);
 	});
+
+	it.each(["linux", "win32"] as const)("rollback routes npm on %s to the fork installer", async (platform) => {
+		const npm = join(dir, "npm");
+		mkdirSync(npm);
+		writeFileSync(join(npm, "installed"), "original package");
+		const before = filesIn(npm);
+		const realPlatform = process.platform;
+		vi.stubEnv("PIBOLT_NPM", "1");
+		runningFrom(join(npm, "pi-bolt"));
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			Object.defineProperty(process, "platform", { value: platform, configurable: true });
+			expect(await handlePackageCommand(["update", "--rollback"])).toBe(true);
+		} finally {
+			Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
+		}
+		const output = error.mock.calls.flat().join("\n");
+		expect(output).toContain("installed with the npm package");
+		expect(output).toContain("migrate to the fork's installer");
+		expect(output).toContain(
+			platform === "win32"
+				? '$env:PIBOLT_VERSION = "bolt-v<version>"; irm https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.ps1 | iex'
+				: "curl -fsSL https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.sh | PIBOLT_VERSION=bolt-v<version> sh",
+		);
+		expect(output).not.toMatch(/npm (?:install|view)/);
+		expect(process.exitCode).toBe(1);
+		expect(filesIn(npm)).toEqual(before);
+		expect(readFileSync(join(npm, "installed"), "utf8")).toBe("original package");
+	});
+
+	it.each(["github-opensec-git-pi-bolt", "pi-bolt"])(
+		"rollback states that unsupported mise %s requires migration",
+		async (folder) => {
+			runningFrom(`/home/me/.local/share/mise/installs/${folder}/1.0.0/pi`);
+			const error = vi.spyOn(console, "error").mockImplementation(() => {});
+			expect(await handlePackageCommand(["update", "--rollback"])).toBe(true);
+			const output = error.mock.calls.flat().join("\n");
+			expect(output).toContain("migrate to the fork's installer");
+			expect(output).toContain(
+				`https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/${process.platform === "win32" ? "install.ps1" : "install.sh"}`,
+			);
+			expect(output).not.toContain("keeps no earlier build");
+			expect(process.exitCode).toBe(1);
+		},
+	);
 
 	it.skipIf(process.platform === "win32")("doctor reports it", async () => {
 		const root = join(dir, "scoop");

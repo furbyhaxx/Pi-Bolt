@@ -247,14 +247,12 @@ export function piBoltPackageManager(
 				uninstall: "brew uninstall pi-bolt",
 			};
 		case "scoop":
-			// (Scoop keeps the versions it updated from, until `scoop cleanup`: reset switches to one.)
 			return {
 				name: "Scoop (unsupported by this fork)",
 				command: "scoop",
 				source: "unsupported by this fork; use the GitHub installer",
 				update: `powershell -c "irm ${PIBOLT_FORK.installPs1Url} | iex"`,
 				uninstall: "scoop uninstall pi-bolt",
-				switchVersion: "scoop reset pi-bolt@<version>",
 			};
 		case "mise": {
 			// (--bump: a version pinned in mise's config, as `mise use tool@1.0.0` writes it, is otherwise kept.)
