@@ -55,6 +55,7 @@ import type {
 	ExtensionError,
 	ExtensionEvent,
 	ExtensionFlag,
+	ExtensionLifecycleFailure,
 	ExtensionMode,
 	ExtensionRuntime,
 	ExtensionShortcut,
@@ -84,6 +85,7 @@ import type {
 	SessionBeforeTreeResult,
 	SessionBoundaryDraft,
 	SessionShutdownEvent,
+	SessionStartEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolRenderers,
@@ -94,6 +96,7 @@ import type {
 	UserBashEvent,
 	UserBashEventResult,
 } from "./types.ts";
+import { ExtensionLifecycleError } from "./types.ts";
 
 // Extension shortcuts compete with canonical keybinding ids from keybindings.json.
 // Only editor-global shortcuts are reserved here. Picker-specific bindings are not.
@@ -1191,6 +1194,25 @@ export class ExtensionRunner {
 		return result as RunnerEmitResult<TEvent>;
 	}
 
+	/** Attempt every lifecycle handler and reject with all failures after dispatch. */
+	async emitLifecycleStrict(event: SessionStartEvent | SessionShutdownEvent): Promise<void> {
+		const ctx = this.createContext();
+		const failures: ExtensionLifecycleFailure[] = [];
+		const reportingErrors: unknown[] = [];
+
+		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
+			for (const handler of handlers) {
+				try {
+					await handler(event, ctx);
+				} catch (cause) {
+					this.recordLifecycleFailure(ext, event.type, cause, failures, reportingErrors);
+				}
+			}
+		}
+
+		if (failures.length > 0) throw new ExtensionLifecycleError(failures, reportingErrors);
+	}
+
 	/**
 	 * `emit` for an event whose handlers' results are not used (`agent_start`, `message_update`, `tool_execution_end`,
 	 * ...), without an await while handlers return synchronously. Returns undefined when every handler returned
@@ -1251,6 +1273,21 @@ export class ExtensionRunner {
 			error: err instanceof Error ? err.message : String(err),
 			stack: err instanceof Error ? err.stack : undefined,
 		});
+	}
+
+	private recordLifecycleFailure(
+		ext: Extension,
+		event: ExtensionLifecycleFailure["event"],
+		cause: unknown,
+		failures: ExtensionLifecycleFailure[],
+		reportingErrors: unknown[],
+	): void {
+		failures.push({ extensionPath: ext.path, event, cause });
+		try {
+			this.emitHandlerError(ext, event, cause);
+		} catch (error) {
+			reportingErrors.push(error);
+		}
 	}
 
 	/** Returns the event's own action unless a handler overrides it; the last override wins. */
@@ -1608,9 +1645,11 @@ export class ExtensionRunner {
 		return { messages, systemPromptOptions: currentOptions };
 	}
 
+	/** Return discovered paths; strict mode rejects after all handlers if any failed. */
 	async emitResourcesDiscover(
 		cwd: string,
 		reason: ResourcesDiscoverEvent["reason"],
+		options?: { strict?: boolean },
 	): Promise<{
 		skillPaths: Array<{ path: string; extensionPath: string }>;
 		promptPaths: Array<{ path: string; extensionPath: string }>;
@@ -1620,6 +1659,8 @@ export class ExtensionRunner {
 		const skillPaths: Array<{ path: string; extensionPath: string }> = [];
 		const promptPaths: Array<{ path: string; extensionPath: string }> = [];
 		const themePaths: Array<{ path: string; extensionPath: string }> = [];
+		const failures: ExtensionLifecycleFailure[] = [];
+		const reportingErrors: unknown[] = [];
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "resources_discover")) {
 			for (const handler of handlers) {
@@ -1638,18 +1679,16 @@ export class ExtensionRunner {
 						themePaths.push(...result.themePaths.map((path) => ({ path, extensionPath: ext.path })));
 					}
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "resources_discover",
-						error: message,
-						stack,
-					});
+					if (options?.strict) {
+						this.recordLifecycleFailure(ext, "resources_discover", err, failures, reportingErrors);
+					} else {
+						this.emitHandlerError(ext, "resources_discover", err);
+					}
 				}
 			}
 		}
 
+		if (failures.length > 0) throw new ExtensionLifecycleError(failures, reportingErrors);
 		return { skillPaths, promptPaths, themePaths };
 	}
 

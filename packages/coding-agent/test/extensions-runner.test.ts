@@ -18,11 +18,13 @@ import {
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
+	ExtensionContext,
 	ExtensionContextActions,
 	ExtensionFactory,
 	ExtensionUIContext,
 	ProviderConfig,
 } from "../src/core/extensions/types.ts";
+import { ExtensionLifecycleError } from "../src/core/extensions/types.ts";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import type { ScopedModel } from "../src/core/model-resolver.ts";
@@ -1364,6 +1366,269 @@ describe("ExtensionRunner", () => {
 
 			await runner.emit({ type: "agent_end", messages: [] });
 			expect(calls).toEqual(["A", "C", "B"]);
+		});
+	});
+
+	describe("strict lifecycle dispatch", () => {
+		it("attempts every shutdown handler and aggregates their original failures", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			const calls: string[] = [];
+			const contexts: ExtensionContext[] = [];
+			const firstError = new Error("first cleanup failed");
+			const secondError = "second cleanup failed";
+			const listenerError = new Error("error listener failed");
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("session_shutdown", (event, ctx) => {
+						calls.push(`first:${event.reason}`);
+						contexts.push(ctx);
+						throw firstError;
+					});
+					pi.on("session_shutdown", async (_event, ctx) => {
+						calls.push("second");
+						contexts.push(ctx);
+						throw secondError;
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<inline:first>",
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("session_shutdown", (_event, ctx) => {
+						calls.push("later");
+						contexts.push(ctx);
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<inline:later>",
+			);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+			const reported: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError((error) => reported.push(error));
+			runner.onError(() => {
+				throw listenerError;
+			});
+
+			const error: unknown = await runner
+				.emitLifecycleStrict({ type: "session_shutdown", reason: "loadout" })
+				.catch((caught: unknown) => caught);
+
+			expect(calls).toEqual(["first:loadout", "second", "later"]);
+			expect(contexts[0]).toBe(contexts[1]);
+			expect(contexts[1]).toBe(contexts[2]);
+			expect(reported).toMatchObject([
+				{ extensionPath: "<inline:first>", event: "session_shutdown", error: "first cleanup failed" },
+				{ extensionPath: "<inline:first>", event: "session_shutdown", error: "second cleanup failed" },
+			]);
+			expect(error).toBeInstanceOf(ExtensionLifecycleError);
+			if (!(error instanceof ExtensionLifecycleError)) throw new Error("expected lifecycle failure");
+			expect(error.failures).toEqual([
+				{ extensionPath: "<inline:first>", event: "session_shutdown", cause: firstError },
+				{ extensionPath: "<inline:first>", event: "session_shutdown", cause: secondError },
+			]);
+			expect(error.failures[0].cause).toBe(firstError);
+			expect(error.errors).toEqual([firstError, secondError, listenerError, listenerError]);
+		});
+
+		it("rejects a failed startup after attempting later owners", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			const calls: string[] = [];
+			const cause = new Error("startup failed");
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("session_start", (event) => {
+						calls.push(`first:${event.reason}`);
+						throw cause;
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<inline:first>",
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("session_start", () => {
+						calls.push("later");
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<inline:later>",
+			);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+			const reported: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError((error) => reported.push(error));
+
+			const error: unknown = await runner
+				.emitLifecycleStrict({ type: "session_start", reason: "loadout" })
+				.catch((caught: unknown) => caught);
+
+			expect(calls).toEqual(["first:loadout", "later"]);
+			expect(reported).toMatchObject([
+				{ extensionPath: "<inline:first>", event: "session_start", error: "startup failed" },
+			]);
+			expect(error).toBeInstanceOf(ExtensionLifecycleError);
+			if (!(error instanceof ExtensionLifecycleError)) throw new Error("expected lifecycle failure");
+			expect(error.failures).toEqual([{ extensionPath: "<inline:first>", event: "session_start", cause }]);
+			expect(error.failures[0].cause).toBe(cause);
+		});
+
+		it("snapshots subscriptions and creates one fresh context per emission", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			const calls: string[] = [];
+			const contexts: ExtensionContext[] = [];
+			let stopLater = () => {};
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("session_start", (_event, ctx) => {
+						calls.push("first");
+						contexts.push(ctx);
+						stopLater();
+						pi.on("session_start", () => {
+							calls.push("added");
+						});
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					stopLater = pi.on("session_start", (_event, ctx) => {
+						calls.push("later");
+						contexts.push(ctx);
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+			);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+
+			await runner.emitLifecycleStrict({ type: "session_start", reason: "loadout" });
+			await runner.emitLifecycleStrict({ type: "session_start", reason: "loadout" });
+
+			expect(calls).toEqual(["first", "later", "first", "added"]);
+			expect(contexts[0]).toBe(contexts[1]);
+			expect(contexts[0] === contexts[2]).toBe(false);
+		});
+
+		it("rejects strict discovery, while default discovery keeps partial results", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			const calls: string[] = [];
+			const cause = new Error("discovery failed");
+			const secondCause = new Error("second discovery failed");
+			let fail = true;
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("resources_discover", (event) => {
+						calls.push(`first:${event.reason}:${event.cwd}`);
+						if (fail) throw cause;
+						return { skillPaths: ["first-skills"] };
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<inline:first>",
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("resources_discover", async () => {
+						calls.push("second");
+						if (fail) throw secondCause;
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<inline:second>",
+			);
+			const later = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("resources_discover", () => {
+						calls.push("later");
+						return { promptPaths: ["later-prompts"], themePaths: ["later-themes"] };
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<inline:later>",
+			);
+			const runner = new ExtensionRunner([first, second, later], runtime, tempDir, sessionManager, modelRegistry);
+			const reported: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError((error) => reported.push(error));
+
+			const error: unknown = await runner
+				.emitResourcesDiscover(tempDir, "loadout", { strict: true })
+				.catch((caught: unknown) => caught);
+			expect(calls).toEqual([`first:loadout:${tempDir}`, "second", "later"]);
+			expect(error).toBeInstanceOf(ExtensionLifecycleError);
+			if (!(error instanceof ExtensionLifecycleError)) throw new Error("expected lifecycle failure");
+			expect(error.failures).toEqual([
+				{ extensionPath: "<inline:first>", event: "resources_discover", cause },
+				{ extensionPath: "<inline:second>", event: "resources_discover", cause: secondCause },
+			]);
+			expect(error.failures[0].cause).toBe(cause);
+			expect(error.failures[1].cause).toBe(secondCause);
+			expect(reported).toMatchObject([
+				{ extensionPath: "<inline:first>", event: "resources_discover", error: "discovery failed" },
+				{ extensionPath: "<inline:second>", event: "resources_discover", error: "second discovery failed" },
+			]);
+
+			await expect(runner.emitResourcesDiscover(tempDir, "reload")).resolves.toEqual({
+				skillPaths: [],
+				promptPaths: [{ path: "later-prompts", extensionPath: "<inline:later>" }],
+				themePaths: [{ path: "later-themes", extensionPath: "<inline:later>" }],
+			});
+			expect(reported).toHaveLength(4);
+			fail = false;
+			await expect(runner.emitResourcesDiscover(tempDir, "loadout", { strict: true })).resolves.toEqual({
+				skillPaths: [{ path: "first-skills", extensionPath: "<inline:first>" }],
+				promptPaths: [{ path: "later-prompts", extensionPath: "<inline:later>" }],
+				themePaths: [{ path: "later-themes", extensionPath: "<inline:later>" }],
+			});
+		});
+
+		it("keeps ordinary emit and dispatch best effort", async () => {
+			const runtime = createExtensionRuntime();
+			const calls: string[] = [];
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("session_start", () => {
+						calls.push("failed");
+						throw new Error("ordinary failure");
+					});
+					pi.on("session_start", () => {
+						calls.push("later");
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			const reported: string[] = [];
+			runner.onError((error) => reported.push(error.error));
+
+			await expect(runner.emit({ type: "session_start", reason: "startup" })).resolves.toBeUndefined();
+			await runner.dispatch({ type: "session_start", reason: "reload" });
+
+			expect(calls).toEqual(["failed", "later", "failed", "later"]);
+			expect(reported).toEqual(["ordinary failure", "ordinary failure"]);
 		});
 	});
 

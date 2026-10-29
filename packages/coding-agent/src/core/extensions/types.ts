@@ -725,7 +725,7 @@ export type ProjectTrustHandler = (
 export interface ResourcesDiscoverEvent {
 	type: "resources_discover";
 	cwd: string;
-	reason: "startup" | "reload";
+	reason: "startup" | "reload" | "loadout";
 }
 
 /** Result from resources_discover event handler */
@@ -751,11 +751,11 @@ export interface McpServersChangeEvent {
 // Session Events
 // ============================================================================
 
-/** Fired when a session is started, loaded, or reloaded */
+/** Fired when a session starts, reloads, or its extension loadout changes. */
 export interface SessionStartEvent {
 	type: "session_start";
 	/** Why this session start happened. */
-	reason: "startup" | "reload" | "new" | "resume" | "fork";
+	reason: "startup" | "reload" | "new" | "resume" | "fork" | "loadout";
 	/** Previously active session file. Present for "new", "resume", and "fork". */
 	previousSessionFile?: string;
 }
@@ -820,10 +820,10 @@ export interface SessionCompactFailedEvent {
 	fromExtension: boolean;
 }
 
-/** Fired before an extension runtime is torn down due to quit, reload, or session replacement. */
+/** Fired before an extension runtime is torn down for quit, reload, session replacement, or a loadout change. */
 export interface SessionShutdownEvent {
 	type: "session_shutdown";
-	reason: "quit" | "reload" | "new" | "resume" | "fork";
+	reason: "quit" | "reload" | "new" | "resume" | "fork" | "loadout";
 	/** Destination session file when shutting down due to session replacement. */
 	targetSessionFile?: string;
 }
@@ -2301,4 +2301,25 @@ export interface ExtensionError {
 	event: string;
 	error: string;
 	stack?: string;
+}
+
+/** An extension handler failure during strict lifecycle dispatch. */
+export interface ExtensionLifecycleFailure {
+	readonly extensionPath: string;
+	readonly event: SessionStartEvent["type"] | SessionShutdownEvent["type"] | ResourcesDiscoverEvent["type"];
+	readonly cause: unknown;
+}
+
+/** Lifecycle handler failures; `errors` also includes failures from error listeners. */
+export class ExtensionLifecycleError extends AggregateError {
+	readonly failures: readonly ExtensionLifecycleFailure[];
+
+	constructor(failures: readonly ExtensionLifecycleFailure[], reportingErrors: readonly unknown[] = []) {
+		super(
+			[...failures.map((failure) => failure.cause), ...reportingErrors],
+			`Extension lifecycle ${failures[0]?.event ?? "dispatch"} failed in ${failures.length} handler(s)`,
+		);
+		this.name = "ExtensionLifecycleError";
+		this.failures = failures.slice();
+	}
 }
