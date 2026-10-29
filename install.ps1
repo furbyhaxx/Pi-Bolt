@@ -1,16 +1,14 @@
 # Pi-Bolt installer for Windows (x64).
 #
-#   irm https://pi-bolt.opensec.in/install.ps1 | iex                       (in PowerShell)
-#   powershell -c "irm https://pi-bolt.opensec.in/install.ps1 | iex"      (in Command Prompt)
+# Run the install.ps1 attached to the fork's GitHub release.
 #
 # Downloads a release, verifies its SHA-256 checksum and the Ed25519 signature of the checksums, installs it to
 # %USERPROFILE%\.pi-bolt and puts `pi-bolt` on your PATH (it asks first). Run it again to reinstall, update or uninstall. The
-# executable comes from the npm registry (a CDN, fast in most places) and falls back to GitHub; the checksums and their signature
-# always come from the GitHub release, so a download from npm is checked against them. Nothing here needs administrator rights,
-# and nothing changes a security setting: the installation is the user's own folder and the user's own PATH.
+# executable, checksums and signature come from the fork's GitHub release. Nothing here needs administrator rights, and nothing
+# changes a security setting: the installation is the user's own folder and the user's own PATH.
 #
 # Environment:
-#   PIBOLT_VERSION   a release tag such as bolt-v0.8.0 (default: the latest release)
+#   PIBOLT_VERSION   a release tag, consisting of the fork's tag prefix and a version (default: the latest release)
 #   PIBOLT_CHANNEL   stable (the latest release; the default) or beta (the newest release, pre-releases included), for this
 #                    installation and its updates (`pi-bolt update --channel` changes it)
 #   PIBOLT_VARIANT   x64 (default), x64-baseline (any x86-64 CPU; picked when the CPU has no AVX2 and the release has one) or
@@ -19,8 +17,8 @@
 #   PIBOLT_NO_PATH=1 leave PATH as it is: do not add the installation, nor take another variant off (pi-bolt update sets it)
 #   PIBOLT_YES=1     do not ask: take the default action and do not offer to start Pi-Bolt
 #   PIBOLT_LAUNCHER=1  used by the npm package's first run: download only, no menu, PATH or prompts
-#   PIBOLT_SOURCE    where to download the executable from: auto (npm, then GitHub; the default), npm or github
-#   PIBOLT_NPM_REGISTRY  the npm registry or mirror to use (default: https://registry.npmjs.org)
+#   PIBOLT_SOURCE    where to download the executable from: auto (GitHub; the default) or github
+#   PIBOLT_NPM_REGISTRY  the npm registry or mirror for optional extensions (default: https://registry.npmjs.org)
 #   PIBOLT_EXTENSIONS  yes or no: whether to install OpenSec's optional extensions (opensec-pi-subagents, opensec-pi-todo, opensec-pi-fff)
 #                    without asking. Without it the installer asks when it can; a run that cannot ask, or PIBOLT_YES=1,
 #                    installs none.
@@ -32,10 +30,12 @@
 #
 # A folder given in PIBOLT_INSTALL outside your profile is made yours, SYSTEM's and the Administrators' only.
 
-# The public key that releases are signed with (keys/release.pub in the repository; scripts/sign-release.sh).
-$PiBoltReleaseKey = 'MCowBQYDK2VwAyEAoLboJqtKaoISPqffk03vHZr+1sRBG3uIRIWeKOew+aY='
-$PiBoltRepo = 'https://github.com/opensec-git/Pi-Bolt'
-$PiBoltApi = 'https://api.github.com/repos/opensec-git/Pi-Bolt'
+# BEGIN GENERATED FORK CONFIG
+$PiBoltReleaseKey = 'MCowBQYDK2VwAyEAzodky4MEbQ+jm01MeMSXCDplGheTW6nzk7FkrWuzraU='
+$PiBoltRepo = 'https://github.com/furbyhaxx/Pi-Bolt'
+$PiBoltApi = 'https://api.github.com/repos/furbyhaxx/Pi-Bolt'
+$PiBoltTagPrefix = 'bolt-v'
+# END GENERATED FORK CONFIG
 
 # --- Modules ---------------------------------------------------------------------------------------------------------------
 # PowerShell 7 passes its own module directories to everything it starts, and they come before this PowerShell's own. An
@@ -255,76 +255,6 @@ function Get-PiBoltFile($client, [string]$url, [string]$file, [string]$what) {
 	}
 }
 
-# Copies one file, by its path in the archive, out of a .tgz (gzip, then tar: what npm publishes) to $out; $false if it is not
-# there or the archive is not one. Read here rather than by tar.exe: the tarball is not verified (the .zip in it is, by the signed
-# checksums, once it is out), so nothing but this reads it: a header at a time, the one file's bytes, nothing else of it kept.
-function Get-PiBoltTarEntry([string]$tgz, [string]$entry, [string]$out) {
-	$in = $null; $gz = $null
-	try {
-		$in = [System.IO.File]::OpenRead($tgz)
-		$gz = [System.IO.Compression.GZipStream]::new($in, [System.IO.Compression.CompressionMode]::Decompress)
-		$header = [byte[]]::new(512)
-		$ascii = [System.Text.Encoding]::ASCII
-		$longName = $null
-		$read = {
-			param([byte[]]$buffer, [long]$count)
-			$got = 0
-			while ($got -lt $count) { $n = $gz.Read($buffer, $got, [int]($count - $got)); if ($n -le 0) { return $false }; $got += $n }
-			$true
-		}
-		$skip = {
-			param([long]$count)
-			$chunk = [byte[]]::new(65536)
-			while ($count -gt 0) { $n = $gz.Read($chunk, 0, [int][Math]::Min($count, 65536)); if ($n -le 0) { return $false }; $count -= $n }
-			$true
-		}
-		while (& $read $header 512) {
-			if ($header[0] -eq 0) { return $false } # the end: two blocks of zeros
-			$octal = $ascii.GetString($header, 124, 12).Trim([char]0, ' ')
-			if ($octal -notmatch '^[0-7]{1,11}$') { return $false }
-			$size = [Convert]::ToInt64($octal, 8)
-			$padded = [long]([Math]::Ceiling($size / 512) * 512)
-			$type = [char]$header[156]
-			$name = $ascii.GetString($header, 0, 100).Split([char]0)[0]
-			if ($ascii.GetString($header, 257, 5) -eq 'ustar') {
-				$prefix = $ascii.GetString($header, 345, 155).Split([char]0)[0]
-				if ($prefix) { $name = "$prefix/$name" }
-			}
-			if ($longName) { $name = $longName; $longName = $null }
-			if ($type -eq 'L' -and $size -le 4096) {
-				# (GNU's long name: the next entry's name, in this one's data.)
-				$data = [byte[]]::new($padded)
-				if (-not (& $read $data $padded)) { return $false }
-				$longName = $ascii.GetString($data, 0, [int]$size).Split([char]0)[0]
-				continue
-			}
-			if (($type -eq '0' -or $type -eq [char]0) -and $name -eq $entry) {
-				# (Before it is verified, a size it says is only believed so far: a release's archive is a few hundred MB.)
-				if ($size -gt 1GB) { return $false }
-				$file = [System.IO.File]::Create($out)
-				try {
-					$chunk = [byte[]]::new(1MB)
-					$left = $size
-					while ($left -gt 0) {
-						$n = $gz.Read($chunk, 0, [int][Math]::Min($left, $chunk.Length))
-						if ($n -le 0) { return $false }
-						$file.Write($chunk, 0, $n)
-						$left -= $n
-					}
-				} finally { $file.Dispose() }
-				return $true
-			}
-			if (-not (& $skip $padded)) { return $false }
-		}
-		$false
-	} catch {
-		$false
-	} finally {
-		if ($gz) { $gz.Dispose() }
-		if ($in) { $in.Dispose() }
-	}
-}
-
 # The line of SHA256SUMS for $name, and whether $file matches it. (A file that SHA256SUMS has no line for does not match.)
 function Test-PiBoltChecksum([string]$sums, [string]$name, [string]$file) {
 	$pattern = "^([0-9a-fA-F]{64}) [ *]?$([regex]::Escape($name))$"
@@ -500,32 +430,10 @@ function Install-PiBoltRelease($state) {
 			}
 		}
 		$file = Join-Path $tmp $archive
-		$from = ''
-		if ($state.Source -ne 'github' -and -not $env:PIBOLT_DOWNLOAD_BASE) {
-			# The npm package @kushalkhemka/pi-bolt-win32-x64 (of the same version) is a .tgz with the release's .zip in it. (Releases
-			# before 0.8.5 have none: they come from GitHub.)
-			$registry = if ($env:PIBOLT_NPM_REGISTRY) { $env:PIBOLT_NPM_REGISTRY.TrimEnd('/') } else { 'https://registry.npmjs.org' }
-			$tgz = Join-Path $tmp 'npm.tgz'
-			if ((Get-PiBoltFile $client "$registry/@kushalkhemka/$name/-/$name-$($state.Version).tgz" $tgz 'downloading')) {
-				if (Get-PiBoltTarEntry $tgz "package/$archive" $file) {
-					Show-PiBoltProgress 'verifying the checksum'
-					if (Test-PiBoltChecksum $sums $archive $file) { $from = 'npm' }
-				}
-			}
-			if (-not $from) {
-				if ($state.Source -eq 'npm') { Stop-PiBolt "npm does not have Pi-Bolt $($state.Version), or its download does not match the release's checksum" }
-				Clear-PiBoltProgress
-				Write-Host "  ${dim}not available from npm; downloading from GitHub instead$reset"
-			}
-		} elseif ($state.Source -eq 'npm') {
-			Stop-PiBolt 'PIBOLT_SOURCE=npm needs the release from GitHub (no PIBOLT_DOWNLOAD_BASE)'
-		}
-		if (-not $from) {
-			if (-not (Get-PiBoltFile $client "$($state.Base)/$archive" $file 'downloading')) { Stop-PiBolt "download failed: $($state.Base)/$archive" }
-			Show-PiBoltProgress 'verifying the checksum'
-			if (-not (Test-PiBoltChecksum $sums $archive $file)) { Stop-PiBolt 'checksum mismatch: the download is corrupt or incomplete' }
-			$from = if ($env:PIBOLT_DOWNLOAD_BASE) { $env:PIBOLT_DOWNLOAD_BASE } else { 'GitHub' }
-		}
+		if (-not (Get-PiBoltFile $client "$($state.Base)/$archive" $file 'downloading')) { Stop-PiBolt "download failed: $($state.Base)/$archive" }
+		Show-PiBoltProgress 'verifying the checksum'
+		if (-not (Test-PiBoltChecksum $sums $archive $file)) { Stop-PiBolt 'checksum mismatch: the download is corrupt or incomplete' }
+		$from = if ($env:PIBOLT_DOWNLOAD_BASE) { $env:PIBOLT_DOWNLOAD_BASE } else { 'GitHub' }
 		Show-PiBoltProgress 'extracting'
 		Add-Type -AssemblyName System.IO.Compression.FileSystem
 		$unpacked = Join-Path $tmp 'unpacked'
@@ -839,43 +747,44 @@ function Install-PiBolt {
 	$launcher = $env:PIBOLT_LAUNCHER -eq '1'
 	if ($launcher) { Write-Host "${bold}  Pi-Bolt$reset`n${dim}  First run: getting the native executable$reset`n" }
 	else { Write-Host "`n${bold}  Pi-Bolt Installer$reset`n${dim}  Pi, compiled ahead of time. Native speed, no JIT.$reset`n" }
+	$source = if ($env:PIBOLT_SOURCE) { $env:PIBOLT_SOURCE } else { 'auto' }
+	if ($source -eq 'npm') { Stop-PiBolt 'PIBOLT_SOURCE=npm is not supported; use auto or github' }
+	if ($source -notin 'auto', 'github') { Stop-PiBolt 'PIBOLT_SOURCE must be auto or github' }
 	Test-PiBoltPrerequisites
 
 	$version = if ($env:PIBOLT_VERSION) { $env:PIBOLT_VERSION } else { 'latest' }
 	$channel = $env:PIBOLT_CHANNEL
 	if ($channel -and $channel -notin 'stable', 'beta') { Stop-PiBolt 'PIBOLT_CHANNEL must be stable or beta' }
-	$source = if ($env:PIBOLT_SOURCE) { $env:PIBOLT_SOURCE } else { 'auto' }
-	if ($source -notin 'auto', 'npm', 'github') { Stop-PiBolt 'PIBOLT_SOURCE must be auto, npm or github' }
 	$variant = $env:PIBOLT_VARIANT
 	if ($variant -and $variant -notin 'x64', 'x64-baseline', 'x64-jit') { Stop-PiBolt 'PIBOLT_VARIANT must be x64, x64-baseline or x64-jit' }
 	# Which release: the latest is looked up once (where its page redirects to), and everything is downloaded from that tag, so a
 	# release published meanwhile cannot mix two. The version is then checked against the signed checksums.
 	$shown = ''
+	$tagPattern = [regex]::Escape($PiBoltTagPrefix)
 	if ($version -ne 'latest') {
-		if ($version -notmatch '^bolt-v(\d+\.\d+\.\d+)$') { Stop-PiBolt 'PIBOLT_VERSION must be a release tag such as bolt-v0.8.0' }
+		if ($version -notmatch "^$tagPattern(\d+\.\d+\.\d+)$") { Stop-PiBolt "PIBOLT_VERSION must be a release tag such as ${PiBoltTagPrefix}0.8.0" }
 		$shown = $Matches[1]
 	} elseif (-not $env:PIBOLT_DOWNLOAD_BASE -and $channel -eq 'beta') {
-		# The newest release, pre-releases included: the highest bolt-vX.Y.Z tag GitHub lists (it lists no drafts to anyone without
-		# write access).
+		# The newest release, pre-releases included: the highest matching tag GitHub lists.
 		try {
 			$releases = (New-PiBoltClient).GetStringAsync("$PiBoltApi/releases?per_page=30").GetAwaiter().GetResult() | ConvertFrom-Json
-			$newest = $releases | Where-Object { -not $_.draft -and $_.tag_name -match '^bolt-v\d+\.\d+\.\d+$' } |
-				ForEach-Object { [version]($_.tag_name -replace '^bolt-v', '') } | Sort-Object -Descending | Select-Object -First 1
+			$newest = $releases | Where-Object { -not $_.draft -and $_.tag_name -match "^$tagPattern\d+\.\d+\.\d+$" } |
+				ForEach-Object { [version]($_.tag_name -replace "^$tagPattern", '') } | Sort-Object -Descending | Select-Object -First 1
 			if ($newest) { $shown = $newest.ToString() }
 		} catch { }
-		if (-not $shown) { Stop-PiBolt "could not find the newest release ($PiBoltApi/releases): try again, or set PIBOLT_VERSION=bolt-vX.Y.Z" }
+		if (-not $shown) { Stop-PiBolt "could not find the newest release ($PiBoltApi/releases): try again, or set PIBOLT_VERSION=${PiBoltTagPrefix}X.Y.Z" }
 	} elseif (-not $env:PIBOLT_DOWNLOAD_BASE) {
 		try {
 			$response = (New-PiBoltClient).GetAsync("$PiBoltRepo/releases/latest").GetAwaiter().GetResult()
-			if ($response.RequestMessage.RequestUri.AbsoluteUri -match '/tag/bolt-v(\d+\.\d+\.\d+)$') { $shown = $Matches[1] }
+			if ($response.RequestMessage.RequestUri.AbsoluteUri -match "/tag/$tagPattern(\d+\.\d+\.\d+)$") { $shown = $Matches[1] }
 		} catch { }
-		if (-not $shown) { Stop-PiBolt "could not find out which release is the latest ($PiBoltRepo/releases/latest): try again, or set PIBOLT_VERSION=bolt-vX.Y.Z" }
+		if (-not $shown) { Stop-PiBolt "could not find out which release is the latest ($PiBoltRepo/releases/latest): try again, or set PIBOLT_VERSION=${PiBoltTagPrefix}X.Y.Z" }
 	} else {
 		# A mirror says which release it serves: without the version asked for, its checksums would be taken for whichever release
 		# they are (an older one, signed all the same, installed as the latest).
-		Stop-PiBolt 'PIBOLT_DOWNLOAD_BASE needs PIBOLT_VERSION (the release it serves, such as bolt-v0.8.0)'
+		Stop-PiBolt "PIBOLT_DOWNLOAD_BASE needs PIBOLT_VERSION (the release it serves, such as ${PiBoltTagPrefix}0.8.0)"
 	}
-	$base = "$PiBoltRepo/releases/download/bolt-v$shown"
+	$base = "$PiBoltRepo/releases/download/$PiBoltTagPrefix$shown"
 	if ($env:PIBOLT_DOWNLOAD_BASE) { $base = $env:PIBOLT_DOWNLOAD_BASE.TrimEnd('/') }
 	if (-not $variant) {
 		$variant = 'x64'
@@ -887,7 +796,7 @@ function Install-PiBolt {
 	# A full path, which is what goes on PATH: a relative one there would be looked up from whatever folder a terminal is in.
 	if (-not [System.IO.Path]::IsPathRooted($install)) { Stop-PiBolt "PIBOLT_INSTALL must be a full path (it is $install)" }
 	$install = [System.IO.Path]::GetFullPath($install)
-	$state = @{ Version = $shown; Shown = $(if ($shown) { $shown } else { '(latest)' }); Source = $source; Base = $base; Platform = 'win32'; Install = $install }
+	$state = @{ Version = $shown; Shown = $(if ($shown) { $shown } else { '(latest)' }); Base = $base; Platform = 'win32'; Install = $install }
 	if ($variant -eq 'x64-baseline-if-there') {
 		$variant = 'x64'
 		try {

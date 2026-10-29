@@ -1,15 +1,14 @@
 #!/bin/sh
 # Pi-Bolt installer.
 #
-#   curl -fsSL https://pi-bolt.opensec.in/install.sh | sh
+# Run the install.sh attached to the fork's GitHub release.
 #
 # Downloads a release, verifies its SHA-256 checksum, installs it to ~/.pi-bolt and links `pi-bolt` into ~/.local/bin. Run
 # it again to reinstall, update or uninstall. In Termux (Android) it also installs Termux's glibc, which runs Pi-Bolt, and links
-# `pi-bolt` into $PREFIX/bin. The executable comes from the npm registry (a CDN, fast in most places) and
-# falls back to GitHub; the checksums always come from the GitHub release, so a download from npm is checked against them.
+# `pi-bolt` into $PREFIX/bin. The executable and signed checksums come from the fork's GitHub release.
 #
 # Environment:
-#   PIBOLT_VERSION   a release tag such as bolt-v0.2.0 (default: the latest release)
+#   PIBOLT_VERSION   a release tag, consisting of the fork's tag prefix and a version (default: the latest release)
 #   PIBOLT_CHANNEL   stable (the latest release; the default) or beta (the newest release, pre-releases included), for this
 #                    installation and its updates (`pi-bolt update --channel` changes it)
 #   PIBOLT_VARIANT   on Linux x86-64, x64, x64-baseline or x64-jit (default: x64 on CPUs with AVX2, x64-baseline otherwise);
@@ -20,8 +19,8 @@
 #   PIBOLT_YES=1     do not ask: take the default action and do not offer to start Pi-Bolt
 #   PIBOLT_LAUNCHER=1  used by the npm package's first run: download only, no menu, link or prompts
 #   PIBOLT_CONNECTIONS  connections to download over at once (default: 4; 1 for a single connection)
-#   PIBOLT_SOURCE    where to download the executable from: auto (npm, then GitHub; the default), npm or github
-#   PIBOLT_NPM_REGISTRY  the npm registry or mirror to use (default: https://registry.npmjs.org)
+#   PIBOLT_SOURCE    where to download the executable from: auto (GitHub; the default) or github
+#   PIBOLT_NPM_REGISTRY  the npm registry or mirror for optional extensions (default: https://registry.npmjs.org)
 #   PIBOLT_UNVERIFIED  the SHA-256 of a release's SHA256SUMS (the installer shows it), to install that download without a
 #                    check of its signature: where nothing here can check it (no OpenSSL 3, OpenSSH 8.1 or Pi-Bolt installed
 #                    before), or for a release from before 0.6.0, which has none. It matches those checksums only, so a value
@@ -34,17 +33,19 @@
 #                    installs none. They are installed at the versions the release pins (its extensions.txt, covered by the
 #                    signed checksums), and only if the registry's tarball has the pinned integrity.
 
-# The public key that releases are signed with (keys/release.pub in the repository; scripts/sign-release.sh), from 0.6.0. A
-# release from before has no signature: it is installed only with PIBOLT_UNVERIFIED.
+# BEGIN GENERATED FORK CONFIG
 RELEASE_KEY="-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAoLboJqtKaoISPqffk03vHZr+1sRBG3uIRIWeKOew+aY=
+MCowBQYDK2VwAyEAzodky4MEbQ+jm01MeMSXCDplGheTW6nzk7FkrWuzraU=
 -----END PUBLIC KEY-----"
+RELEASE_SSH_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM6HZMuDBG0Po5tNTHjElwg6ZRoXk1up85OxZK1rs62l"
+REPO="https://github.com/furbyhaxx/Pi-Bolt"
+API="https://api.github.com/repos/furbyhaxx/Pi-Bolt"
+TAG_PREFIX="bolt-v"
+# END GENERATED FORK CONFIG
 
 ESC=$(printf '\033')
 CR=$(printf '\r')
 ETX=$(printf '\003')
-REPO="https://github.com/opensec-git/Pi-Bolt"
-API="https://api.github.com/repos/opensec-git/Pi-Bolt"
 NPM_REGISTRY="${PIBOLT_NPM_REGISTRY:-https://registry.npmjs.org}"
 
 main() {
@@ -57,12 +58,16 @@ main() {
 	if [ -n "$TERMUX" ]; then BIN_DIR="${PIBOLT_BIN_DIR:-$PREFIX/bin}"; else BIN_DIR="${PIBOLT_BIN_DIR:-$HOME/.local/bin}"; fi
 	LAUNCHER="${PIBOLT_LAUNCHER:-0}"
 	setup_style
+	case "${PIBOLT_SOURCE:-auto}" in
+	auto | github) ;;
+	npm) fail "PIBOLT_SOURCE=npm is not supported; use auto or github" ;;
+	*) fail "PIBOLT_SOURCE must be auto or github" ;;
+	esac
 	# (The npm package's first run is not asked for by the user: nothing is installed there without a signature check.)
 	[ "$LAUNCHER" != 1 ] || unset PIBOLT_UNVERIFIED
 	case "$VERSION" in
 	latest) ;;
-	bolt-v[0-9]*.[0-9]*.[0-9]*) case "${VERSION#bolt-v}" in *[!0-9.]*) fail "PIBOLT_VERSION must be a release tag such as bolt-v1.0.3" ;; esac ;;
-	*) fail "PIBOLT_VERSION must be a release tag such as bolt-v1.0.3" ;;
+	*) version_of_tag "$VERSION" >/dev/null || fail "PIBOLT_VERSION must be a release tag such as ${TAG_PREFIX}1.0.3" ;;
 	esac
 	case "${PIBOLT_CHANNEL:-}" in
 	"" | stable) ;;
@@ -70,7 +75,7 @@ main() {
 		# (The newest release is looked up once, and everything is downloaded from that tag.)
 		if [ "$VERSION" = latest ] && [ -z "${PIBOLT_DOWNLOAD_BASE:-}" ]; then
 			tag=$(newest_release) && [ -n "$tag" ] || fail "could not find the newest release ($API/releases): try again, or set PIBOLT_VERSION"
-			VERSION="bolt-v$tag"
+			VERSION="$TAG_PREFIX$tag"
 		fi
 		;;
 	*) fail "PIBOLT_CHANNEL must be stable or beta" ;;
@@ -102,7 +107,7 @@ main() {
 	if [ -n "${PIBOLT_DOWNLOAD_BASE:-}" ]; then
 		case "$SHOWN_VERSION" in
 		[0-9]*.[0-9]*.[0-9]*) ;;
-		*) fail "which release is the latest could not be found out ($REPO/releases/latest), and a mirror (PIBOLT_DOWNLOAD_BASE) is taken for the release asked for only: set PIBOLT_VERSION to the release it serves, such as bolt-v1.0.3" ;;
+		*) fail "which release is the latest could not be found out ($REPO/releases/latest), and a mirror (PIBOLT_DOWNLOAD_BASE) is taken for the release asked for only: set PIBOLT_VERSION to the release it serves, such as ${TAG_PREFIX}1.0.3" ;;
 		esac
 	fi
 
@@ -119,10 +124,6 @@ main() {
 	*) if is_arm64; then fail "PIBOLT_VARIANT must be arm64 or arm64-jit on ARM64"; else fail "PIBOLT_VARIANT must be x64, x64-baseline or x64-jit"; fi ;;
 	esac
 	[ -z "$TERMUX" ] || setup_termux
-	case "${PIBOLT_SOURCE:-auto}" in
-	auto | npm | github) ;;
-	*) fail "PIBOLT_SOURCE must be auto, npm or github" ;;
-	esac
 	NAME="pi-bolt-$PLATFORM-$VARIANT"
 	if [ "$VERSION" = latest ]; then BASE="$REPO/releases/latest/download"; else BASE="$REPO/releases/download/$VERSION"; fi
 	BASE="${PIBOLT_DOWNLOAD_BASE:-$BASE}"
@@ -319,18 +320,29 @@ finish_progress() { printf '\r%s[K' "$ESC"; [ -t 1 ] && printf '%s[?25h' "$ESC";
 # shellcheck disable=SC2088 # a literal ~ for display
 tilde() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
 
-# The release tag the latest download points to, as a version: bolt-v0.2.0 -> 0.2.0.
-resolve_version() {
-	if [ "$VERSION" != latest ]; then printf '%s' "${VERSION#bolt-v}"; return; fi
-	command -v curl >/dev/null 2>&1 || return 0
-	net_curl -fsSIL -o /dev/null -w '%{url_effective}' "$REPO/releases/latest" | sed -n 's#.*/tag/bolt-v##p'
+version_of_tag() {
+	case "$1" in "$TAG_PREFIX"*) version=${1#"$TAG_PREFIX"} ;; *) return 1 ;; esac
+	case "$version" in '' | *[!0-9.]* | .* | *. | *..*) return 1 ;; esac
+	rest=${version#*.}
+	[ "$rest" != "$version" ] || return 1
+	patch=${rest#*.}
+	[ "$patch" != "$rest" ] || return 1
+	case "$patch" in *.*) return 1 ;; esac
+	printf '%s\n' "$version"
 }
 
-# The newest release, pre-releases included (the beta channel), as a version: the highest bolt-vX.Y.Z tag GitHub lists (it
-# lists no drafts to anyone without write access).
+resolve_version() {
+	if [ "$VERSION" != latest ]; then version_of_tag "$VERSION"; return; fi
+	command -v curl >/dev/null 2>&1 || return 0
+	url=$(net_curl -fsSIL -o /dev/null -w '%{url_effective}' "$REPO/releases/latest") || return 0
+	case "$url" in "$REPO"/releases/tag/*) version_of_tag "${url##*/}" || true ;; esac
+}
+
+# The newest release, pre-releases included, as the highest matching version GitHub lists.
 newest_release() {
 	net_curl -fsSL -H 'Accept: application/vnd.github+json' "$API/releases?per_page=30" |
-		sed -n 's/^ *"tag_name": *"bolt-v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p' |
+		sed -n 's/^ *"tag_name": *"\([^"]*\)".*/\1/p' |
+		while IFS= read -r tag; do version_of_tag "$tag" || true; done |
 		sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1
 }
 
@@ -441,19 +453,8 @@ probe() {
 	fi
 }
 
-# npm_probe URL: like probe, for a file on the npm registry, which sends no size for a HEAD request: asks for its first byte
-# and reads the size from the reply. Fails if the registry does not have it.
-npm_probe() {
-	command -v curl >/dev/null 2>&1 || return 1
-	net_curl -fsSL -r 0-0 -D - -o /dev/null -w 'url %{url_effective}\n' "$1" 2>/dev/null | tr -d '\r' | awk '
-		tolower($1) == "content-range:" { split($3, a, "/"); n = a[2] }
-		$1 == "url" { u = $2 }
-		END { if (u == "" || n + 0 == 0) exit 1; print u, n + 0, 1 }'
-}
-
-# What to download, worked out in the background while the bar moves: the checksums, then the smaller .tar.xz if the release
-# has one and xz is installed (otherwise .tar.gz), where from and how big it is. The .tar.xz is also published on npm, as the
-# package pi-bolt-PLATFORM-VARIANT (pi-bolt-linux-x64, pi-bolt-darwin-arm64, ...) of the same version: that is tried first. Writes "SOURCE EXT FINAL SIZE RANGES" to $TMP/plan.
+# What to download, worked out in the background: the checksums, then the .tar.xz if the release has one and xz is
+# installed (otherwise .tar.gz), where from and how big it is. Writes "SOURCE EXT FINAL SIZE RANGES" to $TMP/plan.
 plan_download() {
 	if ! fetch "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" 2>/dev/null; then
 		echo fail >"$TMP/plan"
@@ -461,25 +462,12 @@ plan_download() {
 	fi
 	ext=tar.gz
 	if can_unxz && grep -q " $NAME.tar.xz\$" "$TMP/SHA256SUMS"; then ext=tar.xz; fi
-	where=""
-	if [ "$ext" = tar.xz ] && [ "${PIBOLT_SOURCE:-auto}" != github ] && [ -z "${PIBOLT_DOWNLOAD_BASE:-}" ]; then
-		case "$SHOWN_VERSION" in
-		[0-9]*.[0-9]*.[0-9]*) where=$(npm_probe "$(npm_url)") && where="npm $where" || where="" ;;
-		esac
-	fi
-	if [ -z "$where" ] && [ "${PIBOLT_SOURCE:-auto}" = npm ]; then
-		echo fail-npm >"$TMP/plan"
-		return
-	fi
-	[ -n "$where" ] || where="github $(probe "$BASE/$NAME.$ext")"
-	printf '%s\n' "${where%% *} $ext ${where#* }" >"$TMP/plan.part" && mv "$TMP/plan.part" "$TMP/plan"
+	where=$(probe "$BASE/$NAME.$ext")
+	printf 'github %s %s\n' "$ext" "$where" >"$TMP/plan.part" && mv "$TMP/plan.part" "$TMP/plan"
 }
 
 # Whether a .tar.xz can be unpacked: with xz, or with a tar that reads it itself (bsdtar with liblzma: macOS's tar).
 can_unxz() { command -v xz >/dev/null 2>&1 || tar --version 2>/dev/null | grep -q liblzma; }
-
-# The npm package that holds this release's .tar.xz.
-npm_url() { printf '%s/%s/-/%s-%s.tgz' "$NPM_REGISTRY" "$NAME" "$NAME" "$SHOWN_VERSION"; }
 
 # start_download URL FINAL SIZE RANGES: starts fetching into $TMP/part.N in the background, the process IDs in $PIDS. A big file
 # from a server that sends parts comes in PIBOLT_CONNECTIONS parts at once (default 4): over a long distance, one connection
@@ -551,9 +539,6 @@ fetch_signature() {
 	return 0
 }
 
-# The release key in OpenSSH's form, for SHA256SUMS.sshsig (node scripts/lib/sshsig.mjs pubkey keys/release.pub).
-RELEASE_SSH_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKC26CarSmqCEj6n35NN7x2a/tbEQRt7iESFnijnsPmm"
-
 # Whether ssh-keygen can verify signatures (-Y, OpenSSH 8.1 and later).
 ssh_keygen_verifies() {
 	command -v ssh-keygen >/dev/null 2>&1 || return 1
@@ -616,9 +601,9 @@ unverified_allowed() {
 # fail_unverified WHY: stops, saying how to install this download all the same.
 fail_unverified() {
 	if [ "$LAUNCHER" = 1 ]; then
-		fail "$1 Nothing was installed. Install Pi-Bolt with its installer instead (curl -fsSL https://pi-bolt.opensec.in/install.sh | sh), which says how to go on."
+		fail "$1 Nothing was installed. Install Pi-Bolt with its installer instead (curl -fsSL $REPO/releases/latest/download/install.sh | sh), which says how to go on."
 	fi
-	case "$SHOWN_VERSION" in [0-9]*.[0-9]*.[0-9]*) page="$REPO/releases/tag/bolt-v$SHOWN_VERSION" ;; *) page="$REPO/releases/latest" ;; esac
+	case "$SHOWN_VERSION" in [0-9]*.[0-9]*.[0-9]*) page="$REPO/releases/tag/$TAG_PREFIX$SHOWN_VERSION" ;; *) page="$REPO/releases/latest" ;; esac
 	stale=""
 	if [ -n "${PIBOLT_UNVERIFIED:-}" ]; then stale=" (PIBOLT_UNVERIFIED is set, but not to this download's SHA-256: it applies to one download only)"; fi
 	fail "$1 Nothing was installed$stale. To install this download without the check, compare the SHA-256 of its SHA256SUMS, $SUMS_SHA256, with the one GitHub shows for SHA256SUMS on $page from a device you trust, and run the installer again with PIBOLT_UNVERIFIED=$SUMS_SHA256."
@@ -762,33 +747,12 @@ install_release() {
 	wait "$plan_pid" 2>/dev/null
 	read -r source ext final total ranges <"$TMP/plan" 2>/dev/null || source=fail
 	[ "$source" != fail ] || fail "download failed: $BASE/SHA256SUMS"
-	[ "$source" != fail-npm ] || fail "npm does not have Pi-Bolt $SHOWN_VERSION: $(npm_url)"
-	if [ "$source" = npm ]; then
-		# The package is a .tgz with the release's .tar.xz in it, checked against the release's checksums like any download.
-		if download "$final" "$final" "$total" "$ranges" "$TMP/npm.tgz" &&
-			tar -C "$TMP" -xzf "$TMP/npm.tgz" "package/$NAME.$ext" 2>/dev/null &&
-			mv "$TMP/package/$NAME.$ext" "$TMP/$NAME.$ext" &&
-			{ draw_progress "$step" 10000 "${dim}verifying checksum$reset"; (cd "$TMP" && check_sum "$NAME.$ext"); }; then
-			FROM=npm
-		else
-			[ "${PIBOLT_SOURCE:-auto}" != npm ] || fail "download failed: $final"
-			rm -rf "$TMP/npm.tgz" "$TMP/package" "$TMP/$NAME.$ext"
-			finish_progress
-			printf '  %snot available from npm; downloading from GitHub instead%s\n' "$dim" "$reset"
-			source=github
-			# shellcheck disable=SC2046 # three words
-			set -- $(probe "$BASE/$NAME.$ext")
-			final=$1 total=$2 ranges=$3
-		fi
-	fi
-	if [ "$source" = github ]; then
-		download "$BASE/$NAME.$ext" "$final" "$total" "$ranges" "$TMP/$NAME.$ext" || fail "download failed: $BASE/$NAME.$ext"
-		FROM=GitHub
-		[ -z "${PIBOLT_DOWNLOAD_BASE:-}" ] || FROM="$PIBOLT_DOWNLOAD_BASE"
-		draw_progress "$step" 10000 "${dim}verifying checksum$reset"
-		(cd "$TMP" && check_sum "$NAME.$ext") ||
-			fail "checksum mismatch: the download is corrupt or incomplete"
-	fi
+	download "$BASE/$NAME.$ext" "$final" "$total" "$ranges" "$TMP/$NAME.$ext" || fail "download failed: $BASE/$NAME.$ext"
+	FROM=GitHub
+	[ -z "${PIBOLT_DOWNLOAD_BASE:-}" ] || FROM="$PIBOLT_DOWNLOAD_BASE"
+	draw_progress "$step" 10000 "${dim}verifying checksum$reset"
+	(cd "$TMP" && check_sum "$NAME.$ext") ||
+		fail "checksum mismatch: the download is corrupt or incomplete"
 	if [ -n "$SIG_PID" ] && kill -0 "$SIG_PID" 2>/dev/null; then
 		draw_progress "$step" 10000 "${dim}fetching the signature$reset"
 	fi

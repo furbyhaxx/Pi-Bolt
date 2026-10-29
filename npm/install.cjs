@@ -5,15 +5,13 @@
 // On Windows it installs the native executable: the release build of this package's version, checked as install.ps1 checks
 // it (the Ed25519 signature of the release's SHA256SUMS, the version they say, the build's SHA-256), and unpacked into bin\
 // over the placeholder, so that npm's pi-bolt.cmd and pi-bolt.ps1 start pi-bolt.exe itself, with no Node.js in between.
-// The build comes from the npm package @kushalkhemka/pi-bolt-win32-<variant> of the same version (the release's .zip, byte for byte),
-// or from the GitHub release if that fails; the checksums and their signature always come from the release.
+// The build, checksums and signature come from the fork's GitHub release.
 // On Linux and macOS it puts the launcher (bin/pi-bolt) over the placeholder, and the first run downloads the build, as
 // before.
 //
 // Plain Node.js (18 or later), no dependencies. On Windows it reads, as install.ps1 does:
 //   PIBOLT_VARIANT        x64 (the default), x64-baseline (picked when the CPU has no AVX2 and the release has it) or x64-jit
-//   PIBOLT_SOURCE         auto (npm, then GitHub; the default), npm or github
-//   PIBOLT_NPM_REGISTRY   the npm registry or mirror to download the build from (default: https://registry.npmjs.org)
+//   PIBOLT_SOURCE         auto (GitHub; the default) or github
 //   PIBOLT_DOWNLOAD_BASE  a mirror of the release to download everything from instead (its SHA256SUMS.sig too)
 //   PIBOLT_ALLOW_UNSIGNED  the SHA-256 of a release's SHA256SUMS, to install that download although it has no signature (a
 //                         build of one's own). It matches those checksums only: a value left in the environment does nothing
@@ -27,9 +25,11 @@ const { Readable, Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const zlib = require("node:zlib");
 
-// The public key that releases are signed with (keys/release.pub in the repository, as in install.sh and install.ps1).
-const RELEASE_KEY = "MCowBQYDK2VwAyEAoLboJqtKaoISPqffk03vHZr+1sRBG3uIRIWeKOew+aY=";
-const REPO = "https://github.com/opensec-git/Pi-Bolt";
+// BEGIN GENERATED FORK CONFIG
+const RELEASE_KEY = "MCowBQYDK2VwAyEAzodky4MEbQ+jm01MeMSXCDplGheTW6nzk7FkrWuzraU=";
+const REPO = "https://github.com/furbyhaxx/Pi-Bolt";
+const TAG_PREFIX = "bolt-v";
+// END GENERATED FORK CONFIG
 const VARIANTS = ["x64", "x64-baseline", "x64-jit"];
 
 /** A reason not to install, said to the user as it is. */
@@ -149,112 +149,6 @@ function isSafeEntryName(name) {
 	if (!name || name.startsWith("/") || name.includes(":") || name.includes("\0") || name.includes("\\")) return false;
 	const parts = name.replace(/\/$/, "").split("/");
 	return parts.every((part) => part !== "" && part !== "." && part !== "..");
-}
-
-function tarString(block, start, length) {
-	const end = block.indexOf(0, start);
-	return block.toString("utf8", start, end >= start && end < start + length ? end : start + length);
-}
-
-// (A plain Error, not fail(): a package that is not a tar file this reads is a defect of the package, before anything is
-// verified, and the release on GitHub is tried instead, as for a long name record below.)
-function tarSize(block) {
-	if (block[124] & 0x80) throw new Error("the npm package is not a tar file this installer reads (an entry of 8 GB or more)");
-	const text = tarString(block, 124, 12).trim();
-	if (!/^[0-7]*$/.test(text)) throw new Error("the npm package is not a valid tar file");
-	return text ? Number.parseInt(text, 8) : 0;
-}
-
-/**
- * Copies the file `wanted` ("package/pi-bolt-win32-x64.zip") of an npm package (a .tgz) to `out`, as it reads it; false if
- * the package has no such file. (ustar, with the pax and GNU records for long names that npm's tar may write.)
- */
-async function extractFromTgz(tgz, wanted, out) {
-	let held = Buffer.alloc(0);
-	let dataLeft = 0;
-	let padLeft = 0;
-	let sink;
-	let record; // the data of a pax or GNU long name record, collected
-	let recordType = "";
-	let nextName;
-	let found = false;
-	const finishEntry = async () => {
-		if (sink) {
-			await new Promise((resolve, reject) => sink.end((error) => (error ? reject(error) : resolve())));
-			sink = undefined;
-			found = true;
-		}
-		if (record) {
-			const data = Buffer.concat(record);
-			record = undefined;
-			if (recordType === "L") nextName = tarString(data, 0, data.length);
-			else {
-				const match = /(?:^|\n)\d+ path=([^\n]*)\n/.exec(data.toString("utf8"));
-				if (match) nextName = match[1];
-			}
-		}
-	};
-	const source = fs.createReadStream(tgz, { highWaterMark: CHUNK }).pipe(zlib.createGunzip({ chunkSize: CHUNK }));
-	try {
-		for await (const chunk of source) {
-			held = held.length ? Buffer.concat([held, chunk]) : chunk;
-			let at = 0;
-			while (at < held.length) {
-				if (dataLeft > 0) {
-					const n = Math.min(dataLeft, held.length - at);
-					const piece = held.subarray(at, at + n);
-					if (sink) {
-						if (!sink.write(piece)) await new Promise((resolve) => sink.once("drain", resolve));
-					} else if (record) record.push(Buffer.from(piece));
-					dataLeft -= n;
-					at += n;
-					if (dataLeft === 0) await finishEntry();
-					continue;
-				}
-				if (padLeft > 0) {
-					const n = Math.min(padLeft, held.length - at);
-					padLeft -= n;
-					at += n;
-					continue;
-				}
-				if (held.length - at < 512) break;
-				const block = held.subarray(at, at + 512);
-				at += 512;
-				if (block.every((byte) => byte === 0)) continue;
-				const type = String.fromCharCode(block[156] || 0x30);
-				const size = tarSize(block);
-				let name = tarString(block, 0, 100);
-				const prefix = block.toString("latin1", 257, 263).startsWith("ustar") ? tarString(block, 345, 155) : "";
-				if (prefix) name = `${prefix}/${name}`;
-				if (nextName !== undefined && type !== "x" && type !== "L") {
-					name = nextName;
-					nextName = undefined;
-				}
-				if (type === "x" || type === "L") {
-					// (A name: a few hundred bytes. Read before anything is verified, so a record is not let fill memory.)
-					// (As any other defect of the package: not this way, then; the release on GitHub is the other.)
-					if (size > 65536) throw new Error("a name record too long to be one");
-					record = [];
-					recordType = type;
-				} else if ((type === "0" || type === "\0") && name === wanted && !found) {
-					sink = fs.createWriteStream(out, { highWaterMark: CHUNK });
-				}
-				dataLeft = size;
-				padLeft = (512 - (size % 512)) % 512;
-				if (size === 0) await finishEntry();
-			}
-			held = held.subarray(at);
-		}
-	} catch (error) {
-		if (sink) sink.destroy();
-		if (error instanceof InstallError) throw error;
-		return false;
-	}
-	if (sink || dataLeft > 0) {
-		if (sink) sink.destroy();
-		return false; // cut short
-	}
-	return found;
 }
 
 /**
@@ -470,12 +364,12 @@ async function installWindows({
 	if (problems.length) fail(problems.join(" "));
 	if (typeof fetchImpl !== "function") fail("this Node.js has no fetch: use Node.js 18 or later");
 	const source = env.PIBOLT_SOURCE || "auto";
-	if (!["auto", "npm", "github"].includes(source)) fail("PIBOLT_SOURCE must be auto, npm or github");
+	if (source === "npm") fail("PIBOLT_SOURCE=npm is not supported; use auto or github");
+	if (!["auto", "github"].includes(source)) fail("PIBOLT_SOURCE must be auto or github");
 	let variant = env.PIBOLT_VARIANT || "";
 	if (variant && !VARIANTS.includes(variant)) fail("PIBOLT_VARIANT must be x64, x64-baseline or x64-jit");
 	const mirror = withoutTrailingSlashes(env.PIBOLT_DOWNLOAD_BASE || "");
-	if (source === "npm" && mirror) fail("PIBOLT_SOURCE=npm needs the release from GitHub (no PIBOLT_DOWNLOAD_BASE)");
-	const base = mirror || `${REPO}/releases/download/bolt-v${version}`;
+	const base = mirror || `${REPO}/releases/download/${TAG_PREFIX}${version}`;
 	const bin = path.join(pkgDir, "bin");
 	const stage = fs.mkdtempSync(path.join(pkgDir, ".install-"));
 	try {
@@ -493,30 +387,9 @@ async function installWindows({
 		const want = checksumOf(text, archive);
 		if (!want) fail(`this release has no Windows build ${variant} (${archive} is not in its SHA256SUMS)`);
 		const zip = path.join(stage, archive);
-		let from = "";
-		if (source !== "github" && !mirror) {
-			// The npm package @kushalkhemka/pi-bolt-win32-<variant> of the same version: a .tgz with the release's .zip in it.
-			// (Releases before 0.8.5 have none: they come from GitHub.)
-			const registry = withoutTrailingSlashes(env.PIBOLT_NPM_REGISTRY || "https://registry.npmjs.org");
-			const tgz = path.join(stage, "npm.tgz");
-			if (
-				(await download(fetchImpl, `${registry}/@kushalkhemka/${name}/-/${name}-${version}.tgz`, tgz)) &&
-				(await extractFromTgz(tgz, `package/${archive}`, zip)) &&
-				(await sha256(zip)) === want
-			) {
-				from = "npm";
-			}
-			fs.rmSync(tgz, { force: true });
-			if (!from) {
-				if (source === "npm") fail(`npm does not have Pi-Bolt ${version}, or its download does not match the release's checksum. Nothing was installed.`);
-				log("pi-bolt: not available from npm; downloading from GitHub instead");
-			}
-		}
-		if (!from) {
-			if (!(await download(fetchImpl, `${base}/${archive}`, zip))) fail(`download failed: ${base}/${archive}`);
-			if ((await sha256(zip)) !== want) fail("checksum mismatch: the download is corrupt or incomplete. Nothing was installed.");
-			from = mirror || "GitHub";
-		}
+		if (!(await download(fetchImpl, `${base}/${archive}`, zip))) fail(`download failed: ${base}/${archive}`);
+		if ((await sha256(zip)) !== want) fail("checksum mismatch: the download is corrupt or incomplete. Nothing was installed.");
+		const from = mirror || "GitHub";
 		const unpacked = path.join(stage, "unpacked");
 		await extractZip(zip, name, unpacked);
 		const tree = path.join(unpacked, name);
@@ -591,7 +464,6 @@ module.exports = {
 	InstallError,
 	checksumOf,
 	checkSums,
-	extractFromTgz,
 	extractZip,
 	installPosix,
 	installWindows,
@@ -611,7 +483,7 @@ if (require.main === module) {
 			console.error(`pi-bolt: downloads went through the proxy ${proxy.replace(/\/\/[^@/]*@/, "//")}; a Node.js older than 22.21 or 24.5 cannot use one (NODE_USE_ENV_PROXY)`);
 		}
 		if (process.platform === "win32") {
-			console.error('pi-bolt: Pi-Bolt was not installed. Try again, or install it with: powershell -c "irm https://pi-bolt.opensec.in/install.ps1 | iex"');
+			console.error(`pi-bolt: Pi-Bolt was not installed. Try again, or install it with: powershell -c "irm ${REPO}/releases/latest/download/install.ps1 | iex"`);
 		}
 		process.exitCode = 1;
 	});

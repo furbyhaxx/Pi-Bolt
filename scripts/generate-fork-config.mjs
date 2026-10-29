@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { execFileSync } from "node:child_process";
 import { createPublicKey } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -10,6 +11,7 @@ let configFile = join(root, "fork.json");
 let outputFile = join(root, "packages/coding-agent/src/pi-bolt-fork.generated.ts");
 let check = false;
 let json = false;
+let customPaths = false;
 const args = process.argv.slice(2);
 
 for (let i = 0; i < args.length; i++) {
@@ -19,6 +21,7 @@ for (let i = 0; i < args.length; i++) {
 	else if (arg === "--config" || arg === "--output") {
 		const value = args[++i];
 		if (!value || value.startsWith("--")) throw new Error(`${arg} requires a path`);
+		customPaths = true;
 		if (arg === "--config") configFile = resolve(value);
 		else outputFile = resolve(value);
 	} else throw new Error(`Unknown argument: ${arg}`);
@@ -86,12 +89,42 @@ if (json) {
 		"} as const;",
 		"",
 	].join("\n");
-	if (check) {
-		if (!existsSync(outputFile) || readFileSync(outputFile, "utf8") !== generated) {
-			console.error(`${outputFile} is out of date; run node scripts/generate-fork-config.mjs`);
-			process.exitCode = 1;
+	const outputs = [[outputFile, generated]];
+	// Custom paths target fixtures or alternate TS output, not the checkout's installers.
+	if (!customPaths) {
+		const key = createPublicKey(releasePublicKey);
+		const pem = key.export({ type: "spki", format: "pem" }).trimEnd();
+		const spki = key.export({ type: "spki", format: "der" }).toString("base64");
+		const ssh = execFileSync(process.execPath, [join(root, "scripts/lib/sshsig.mjs"), "pubkey", resolve(dirname(configFile), config.publicKeyFile)], { encoding: "utf8" }).trim();
+		const api = `https://api.github.com/repos/${config.repository}`;
+		const blocks = [
+			["install.sh", "#", [`RELEASE_KEY="${pem}"`, `RELEASE_SSH_KEY="${ssh}"`, `REPO="${repositoryUrl}"`, `API="${api}"`, `TAG_PREFIX="${config.tagPrefix}"`]],
+			["install.ps1", "#", [`$PiBoltReleaseKey = '${spki}'`, `$PiBoltRepo = '${repositoryUrl}'`, `$PiBoltApi = '${api}'`, `$PiBoltTagPrefix = '${config.tagPrefix}'`]],
+			["npm/install.cjs", "//", [`const RELEASE_KEY = "${spki}";`, `const REPO = "${repositoryUrl}";`, `const TAG_PREFIX = "${config.tagPrefix}";`]],
+		];
+		for (const [relative, comment, lines] of blocks) {
+			const file = join(root, relative);
+			const content = readFileSync(file, "utf8");
+			const startMarker = `${comment} BEGIN GENERATED FORK CONFIG`;
+			const endMarker = `${comment} END GENERATED FORK CONFIG`;
+			const start = content.indexOf(startMarker);
+			const end = content.indexOf(endMarker);
+			if (start < 0 || end <= start || content.indexOf(startMarker, start + 1) >= 0 || content.indexOf(endMarker, end + 1) >= 0) {
+				throw new Error(`${file} must contain exactly one generated fork config block`);
+			}
+			const newline = content.includes("\r\n") ? "\r\n" : "\n";
+			const block = [startMarker, ...lines, endMarker].join("\n").replace(/\n/g, newline);
+			outputs.push([file, content.slice(0, start) + block + content.slice(end + endMarker.length)]);
 		}
-	} else {
-		writeFileSync(outputFile, generated);
+	}
+	for (const [file, content] of outputs) {
+		if (!existsSync(file) || readFileSync(file, "utf8") !== content) {
+			if (check) {
+				console.error(`${file} is out of date; run node scripts/generate-fork-config.mjs`);
+				process.exitCode = 1;
+			} else {
+				writeFileSync(file, content);
+			}
+		}
 	}
 }

@@ -3,10 +3,10 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
@@ -75,43 +75,6 @@ function makeZip(entries) {
 	return Buffer.concat([...locals, directory, end]);
 }
 
-function tarHeader(name, size, type = "0") {
-	const header = Buffer.alloc(512);
-	header.write(name, 0, 100, "utf8");
-	header.write("0000644\0", 100);
-	header.write("0000000\0", 108);
-	header.write("0000000\0", 116);
-	header.write(`${size.toString(8).padStart(11, "0")}\0`, 124);
-	header.write("00000000000\0", 136);
-	header.write("        ", 148);
-	header.write(type, 156);
-	header.write("ustar\0", 257);
-	header.write("00", 263);
-	let sum = 0;
-	for (const byte of header) sum += byte;
-	header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148);
-	return header;
-}
-
-/** An npm package (.tgz) of `files` ({ name, data }); `paxName` gives the first file its name with a pax record. */
-function makeTgz(files, { paxName } = {}) {
-	const parts = [];
-	const pad = (n) => Buffer.alloc((512 - (n % 512)) % 512);
-	for (const [i, { name, data }] of files.entries()) {
-		if (i === 0 && paxName) {
-			// "LENGTH path=NAME\n", LENGTH counting itself.
-			const body = ` path=${paxName}\n`;
-			let length = Buffer.byteLength(body);
-			while (String(length).length + Buffer.byteLength(body) !== length) length = String(length).length + Buffer.byteLength(body);
-			const bytes = Buffer.from(`${length}${body}`);
-			parts.push(tarHeader("PaxHeader/x", bytes.length, "x"), bytes, pad(bytes.length));
-		}
-		parts.push(tarHeader(name, data.length), data, pad(data.length));
-	}
-	parts.push(Buffer.alloc(1024));
-	return zlib.gzipSync(Buffer.concat(parts));
-}
-
 // --- A release ----------------------------------------------------------------------------------------------------------
 
 function newKey() {
@@ -151,7 +114,8 @@ function makeRelease({ signer, sumsVersion = VERSION, zips = { x64: buildZip() }
 	return files;
 }
 
-const GITHUB = `https://github.com/opensec-git/Pi-Bolt/releases/download/bolt-v${VERSION}`;
+const fork = JSON.parse(readFileSync(join(root, "fork.json"), "utf8"));
+const GITHUB = `https://github.com/${fork.repository}/releases/download/${fork.tagPrefix}${VERSION}`;
 const REGISTRY = "https://registry.npmjs.org";
 const npmUrl = (variant = "x64") => `${REGISTRY}/@kushalkhemka/pi-bolt-win32-${variant}/-/pi-bolt-win32-${variant}-${VERSION}.tgz`;
 
@@ -168,13 +132,6 @@ function fakeFetch(routes) {
 
 function githubRoutes(release, base = GITHUB) {
 	return Object.fromEntries(Object.entries(release).map(([name, data]) => [`${base}/${name}`, data]));
-}
-
-function npmPackage(zip, variant = "x64") {
-	return makeTgz([
-		{ name: "package/package.json", data: Buffer.from(`{"name":"@kushalkhemka/pi-bolt-win32-${variant}","version":"${VERSION}"}`) },
-		{ name: `package/pi-bolt-win32-${variant}.zip`, data: zip },
-	]);
 }
 
 /** A package folder as npm leaves it before the install script runs. */
@@ -224,11 +181,216 @@ test("the package: bin/pi-bolt.exe on every platform, a placeholder with no #! l
 	assert.equal(pkg.dependencies, undefined);
 });
 
-test("the release key is keys/release.pub, the one install.sh and install.ps1 have", () => {
-	const pem = readFileSync(join(root, "keys", "release.pub"), "utf8");
-	assert.equal(install.RELEASE_KEY, pem.replace(/-----[A-Z ]+-----/g, "").replace(/\s/g, ""));
-	assert.ok(readFileSync(join(root, "install.ps1"), "utf8").includes(`$PiBoltReleaseKey = '${install.RELEASE_KEY}'`));
-	assert.ok(readFileSync(join(root, "install.sh"), "utf8").includes(install.RELEASE_KEY));
+test("the generated release keys agree in PEM, SPKI and OpenSSH form", () => {
+	const pemFile = join(root, fork.publicKeyFile);
+	const pem = readFileSync(pemFile, "utf8");
+	const spki = crypto.createPublicKey(pem).export({ format: "der", type: "spki" }).toString("base64");
+	const ssh = spawnSync(process.execPath, [join(root, "scripts/lib/sshsig.mjs"), "pubkey", pemFile], { encoding: "utf8" });
+	assert.equal(ssh.status, 0, ssh.stderr);
+	assert.equal(install.RELEASE_KEY, spki);
+	assert.ok(readFileSync(join(root, "install.ps1"), "utf8").includes(`$PiBoltReleaseKey = '${spki}'`));
+	const sh = readFileSync(join(root, "install.sh"), "utf8");
+	assert.ok(sh.includes(`RELEASE_KEY="${pem.trimEnd()}"`));
+	assert.ok(sh.includes(`RELEASE_SSH_KEY="${ssh.stdout.trim()}"`));
+});
+
+function forkFixture(t) {
+	const dir = mkdtempSync(join(tmpdir(), "pi-bolt-fork-test-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	for (const file of ["scripts/generate-fork-config.mjs", "scripts/lib/sshsig.mjs", "install.sh", "install.ps1", "npm/install.cjs", "packages/coding-agent/src/pi-bolt-fork.generated.ts"]) {
+		const target = join(dir, file);
+		mkdirSync(dirname(target), { recursive: true });
+		copyFileSync(join(root, file), target);
+	}
+	const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+	const config = { ...fork, repository: "test-owner/Fork.Project", tagPrefix: "rel.v-", publicKeyFile: "release.pub" };
+	writeFileSync(join(dir, "fork.json"), JSON.stringify(config));
+	writeFileSync(join(dir, "release.pub"), publicKey.export({ type: "spki", format: "pem" }));
+	return { dir, config, publicKey, privateKey };
+}
+
+function generate(dir, ...args) {
+	return spawnSync(process.execPath, [join(dir, "scripts/generate-fork-config.mjs"), ...args], { encoding: "utf8" });
+}
+
+test("generator stamps and checks standalone identity while custom paths stay isolated", (t) => {
+	const { dir, config, publicKey } = forkFixture(t);
+	const files = ["install.sh", "install.ps1", "npm/install.cjs", "packages/coding-agent/src/pi-bolt-fork.generated.ts"];
+	const before = files.map((file) => readFileSync(join(dir, file), "utf8"));
+	const custom = join(dir, "custom.ts");
+	let result = generate(dir, "--config", join(dir, "fork.json"), "--output", custom);
+	assert.equal(result.status, 0, result.stderr);
+	assert.deepEqual(files.map((file) => readFileSync(join(dir, file), "utf8")), before);
+	assert.equal(generate(dir, "--config", join(dir, "fork.json"), "--output", custom, "--check").status, 0);
+	result = generate(dir, "--config", join(dir, "fork.json"), "--json");
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(JSON.parse(result.stdout).repository, config.repository);
+	assert.equal(generate(dir, "--check").status, 1);
+	result = generate(dir);
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(generate(dir, "--check").status, 0);
+	const spki = publicKey.export({ format: "der", type: "spki" }).toString("base64");
+	const ssh = spawnSync(process.execPath, [join(dir, "scripts/lib/sshsig.mjs"), "pubkey", join(dir, "release.pub")], { encoding: "utf8" });
+	assert.equal(ssh.status, 0, ssh.stderr);
+	const sh = readFileSync(join(dir, "install.sh"), "utf8");
+	const ps = readFileSync(join(dir, "install.ps1"), "utf8");
+	const cjs = readFileSync(join(dir, "npm/install.cjs"), "utf8");
+	assert.ok(sh.includes(`RELEASE_SSH_KEY="${ssh.stdout.trim()}"`));
+	assert.ok(sh.includes(`REPO="https://github.com/${config.repository}"`));
+	assert.ok(sh.includes(`API="https://api.github.com/repos/${config.repository}"`));
+	assert.ok(sh.includes(`TAG_PREFIX="${config.tagPrefix}"`));
+	assert.ok(sh.includes(`RELEASE_KEY="${publicKey.export({ type: "spki", format: "pem" }).trimEnd()}"`));
+	assert.ok(ps.includes(`$PiBoltReleaseKey = '${spki}'`));
+	assert.ok(ps.includes(`$PiBoltRepo = 'https://github.com/${config.repository}'`));
+	assert.ok(ps.includes(`$PiBoltApi = 'https://api.github.com/repos/${config.repository}'`));
+	assert.ok(ps.includes(`$PiBoltTagPrefix = '${config.tagPrefix}'`));
+	assert.ok(cjs.includes(`const RELEASE_KEY = "${spki}";`));
+	assert.ok(cjs.includes(`const REPO = "https://github.com/${config.repository}";`));
+	assert.ok(cjs.includes(`const TAG_PREFIX = "${config.tagPrefix}";`));
+	for (const file of files.slice(0, 3)) {
+		const target = join(dir, file);
+		const original = readFileSync(target, "utf8");
+		writeFileSync(target, original.replace(config.repository, "other-owner/Other"));
+		result = generate(dir, "--check");
+		assert.equal(result.status, 1, file);
+		assert.ok(result.stderr.includes(file), result.stderr);
+		writeFileSync(target, original);
+	}
+	const target = join(dir, "install.sh");
+	writeFileSync(target, readFileSync(target, "utf8").replace("# END GENERATED FORK CONFIG", "# missing marker"));
+	result = generate(dir, "--check");
+	assert.equal(result.status, 1);
+	assert.match(result.stderr, /exactly one generated fork config block/);
+});
+
+test("Windows: a regenerated fork uses its configured repository and tag prefix", async (t) => {
+	const { dir, config } = forkFixture(t);
+	const generated = generate(dir);
+	assert.equal(generated.status, 0, generated.stderr);
+	const fixtureInstall = require(join(dir, "npm/install.cjs"));
+	const signer = newKey();
+	const base = `https://github.com/${config.repository}/releases/download/${config.tagPrefix}${VERSION}`;
+	const { fetch, asked } = fakeFetch(githubRoutes(makeRelease({ signer }), base));
+	const result = await fixtureInstall.installWindows({
+		pkgDir: makePackage(t), version: VERSION, env: { PROCESSOR_ARCHITECTURE: "AMD64" }, fetch, key: signer.key,
+		runsVersion: () => true, hasAvx2: () => true, release: WINDOWS_10_1809, log: () => {},
+	});
+	assert.equal(result.from, "GitHub");
+	assert.deepEqual(asked, [`${base}/SHA256SUMS`, `${base}/SHA256SUMS.sig`, `${base}/pi-bolt-win32-x64.zip`]);
+});
+
+function runShPlan(t, dir, env) {
+	const script = readFileSync(join(dir, "install.sh"), "utf8");
+	const testDir = mkdtempSync(join(tmpdir(), "pi-bolt-sh-plan-"));
+	t.after(() => rmSync(testDir, { recursive: true, force: true }));
+	const requests = join(testDir, "requests");
+	const harness = [
+		"preflight() { :; }",
+		"logo_animation() { :; }",
+		"uname() { case \"$1\" in -s) echo Linux ;; -m) echo x86_64 ;; esac; }",
+		"is_termux() { return 1; }",
+		"is_arm64() { return 1; }",
+		"net_curl() {",
+		"  for arg do url=$arg; done",
+		"  printf '%s\\n' \"$url\" >>\"$TEST_REQUESTS\"",
+		"  case \"$url\" in",
+		"    \"$REPO/releases/latest\") printf '%s' \"$REPO/releases/tag/${TAG_PREFIX}1.2.3\" ;;",
+		"    \"$API/releases?per_page=30\") printf '%s\\n' '  \"tag_name\": \"rel.v-1.2.3\",' '  \"tag_name\": \"relXv-9.9.9\",' '  \"tag_name\": \"rel.v-1.10.0\",' ;;",
+		"    *) return 1 ;;",
+		"  esac",
+		"}",
+		"fetch() { printf '%s\\n' \"$2\" >>\"$TEST_REQUESTS\"; printf 'hash  %s.tar.xz\\n' \"$NAME\" >\"$1\"; }",
+		"probe() { printf '%s\\n' \"$1\" >>\"$TEST_REQUESTS\"; printf '%s 0 0\\n' \"$1\"; }",
+		"can_unxz() { return 0; }",
+		"install_release() { TMP=\"$TEST_TMP\"; mkdir -p \"$TMP\"; plan_download; printf 'RESULT %s %s\\n' \"$SHOWN_VERSION\" \"$BASE\"; }",
+		"main \"$@\"",
+	].join("\n");
+	const file = join(testDir, "installer.sh");
+	assert.match(script, /\nmain "\$@"\s*$/);
+	writeFileSync(file, script.replace(/\nmain "\$@"\s*$/, `\n${harness}\n`));
+	const result = spawnSync("sh", [file], {
+		encoding: "utf8",
+		env: { PATH: process.env.PATH, HOME: testDir, TEST_TMP: join(testDir, "plan"), TEST_REQUESTS: requests, PIBOLT_LAUNCHER: "1", PIBOLT_VARIANT: "x64", ...env },
+	});
+	return { ...result, asked: existsSync(requests) ? readFileSync(requests, "utf8").trim().split("\n") : [] };
+}
+
+test("POSIX: generated fork routes, beta selection, mirrors and npm rejection", { skip: (!findSh() || process.platform === "win32") && "no POSIX sh" }, (t) => {
+	const { dir, config } = forkFixture(t);
+	const generated = generate(dir);
+	assert.equal(generated.status, 0, generated.stderr);
+	const repo = `https://github.com/${config.repository}`;
+	const api = `https://api.github.com/repos/${config.repository}`;
+	const version = `${config.tagPrefix}1.2.3`;
+	const explicit = runShPlan(t, dir, { PIBOLT_VERSION: version });
+	assert.equal(explicit.status, 0, explicit.stderr);
+	assert.deepEqual(explicit.asked, [`${repo}/releases/download/${version}/SHA256SUMS`, `${repo}/releases/download/${version}/pi-bolt-linux-x64.tar.xz`]);
+	const latest = runShPlan(t, dir, {});
+	assert.equal(latest.status, 0, latest.stderr);
+	assert.deepEqual(latest.asked, [`${repo}/releases/latest`, `${repo}/releases/latest/download/SHA256SUMS`, `${repo}/releases/latest/download/pi-bolt-linux-x64.tar.xz`]);
+	assert.match(latest.stdout, /RESULT 1\.2\.3 /);
+	const beta = runShPlan(t, dir, { PIBOLT_CHANNEL: "beta" });
+	assert.equal(beta.status, 0, beta.stderr);
+	assert.deepEqual(beta.asked, [`${api}/releases?per_page=30`, `${repo}/releases/download/${config.tagPrefix}1.10.0/SHA256SUMS`, `${repo}/releases/download/${config.tagPrefix}1.10.0/pi-bolt-linux-x64.tar.xz`]);
+	const mirror = runShPlan(t, dir, { PIBOLT_VERSION: version, PIBOLT_DOWNLOAD_BASE: "http://mirror.test/releases" });
+	assert.equal(mirror.status, 0, mirror.stderr);
+	assert.deepEqual(mirror.asked, ["http://mirror.test/releases/SHA256SUMS", "http://mirror.test/releases/pi-bolt-linux-x64.tar.xz"]);
+	const npm = runShPlan(t, dir, { PIBOLT_SOURCE: "npm" });
+	assert.notEqual(npm.status, 0);
+	assert.match(npm.stderr, /PIBOLT_SOURCE=npm.*not supported/);
+	assert.deepEqual(npm.asked, []);
+	for (const invalid of ["relXv-1.2.3", "rel.v-1.2.3.4", "rel.v-1..3"]) {
+		const result = runShPlan(t, dir, { PIBOLT_VERSION: invalid });
+		assert.notEqual(result.status, 0, invalid);
+		assert.match(result.stderr, /PIBOLT_VERSION must be a release tag/);
+		assert.deepEqual(result.asked, []);
+	}
+});
+
+test("POSIX: generated PEM and OpenSSH keys verify signatures and reject another signer", {
+	skip: (!findSh() || process.platform === "win32" || !/^OpenSSL (?:[3-9]|[1-9]\d)/.test(spawnSync("openssl", ["version"], { encoding: "utf8" }).stdout || "") || spawnSync("ssh-keygen", ["-V"]).error) && "requires sh, OpenSSL 3 and ssh-keygen",
+}, (t) => {
+	const { dir, privateKey } = forkFixture(t);
+	const generated = generate(dir);
+	assert.equal(generated.status, 0, generated.stderr);
+	const tmp = join(dir, "verify");
+	mkdirSync(tmp);
+	const sums = Buffer.from("# pi-bolt 1.2.3\n");
+	const sumsFile = join(tmp, "SHA256SUMS");
+	const keyFile = join(tmp, "fixture-key.pem");
+	writeFileSync(sumsFile, sums);
+	const script = readFileSync(join(dir, "install.sh"), "utf8");
+	const runVerify = (ssh) => {
+		const harness = [
+			"set -eu",
+			"setup_style",
+			"TMP=\"$TEST_TMP\"; SHOWN_VERSION=1.2.3; SIG_PID=''; LAUNCHER=1; SIGNED=''; UNSIGNED=''; NOVERIFY=''",
+			ssh ? "openssl3() { return 1; }" : "ssh_keygen_verifies() { return 1; }",
+			"verify_signature",
+			"printf 'signed=%s\\n' \"$SIGNED\"",
+		].join("\n");
+		const file = join(tmp, "harness.sh");
+		writeFileSync(file, script.replace(/\nmain "\$@"\s*$/, `\n${harness}\n`));
+		return spawnSync("sh", [file], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: dir, TEST_TMP: tmp } });
+	};
+	const sign = (key) => {
+		writeFileSync(keyFile, key.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+		writeFileSync(join(tmp, "SHA256SUMS.sig"), crypto.sign(null, sums, key));
+		const result = spawnSync(process.execPath, [join(dir, "scripts/lib/sshsig.mjs"), "sign", keyFile, sumsFile, join(tmp, "SHA256SUMS.sshsig")], { encoding: "utf8" });
+		assert.equal(result.status, 0, result.stderr);
+	};
+	sign(privateKey);
+	for (const ssh of [false, true]) {
+		const result = runVerify(ssh);
+		assert.equal(result.status, 0, result.stderr);
+		assert.match(result.stdout, /signed=1/);
+	}
+	sign(crypto.generateKeyPairSync("ed25519").privateKey);
+	for (const ssh of [false, true]) {
+		const result = runVerify(ssh);
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /signature does not verify/);
+	}
 });
 
 test("in Pi-Bolt's repository the install script leaves the placeholder alone", () => {
@@ -238,50 +400,47 @@ test("in Pi-Bolt's repository the install script leaves the placeholder alone", 
 
 // --- Windows ------------------------------------------------------------------------------------------------------------
 
-test("Windows: installs the build from npm, signature and checksum verified, over the placeholder", async (t) => {
+test("Windows: auto installs only the fork's signed GitHub release", async (t) => {
 	const signer = newKey();
 	const release = makeRelease({ signer });
-	const { fetch, asked } = fakeFetch({ ...githubRoutes(release), [npmUrl()]: npmPackage(release["pi-bolt-win32-x64.zip"]) });
+	const { fetch, asked } = fakeFetch({ ...githubRoutes(release), [npmUrl()]: Buffer.from("upstream package") });
 	const pkgDir = makePackage(t);
 	let ran;
 	const { promise, log } = run(pkgDir, { fetch, key: signer.key, runsVersion: (exe) => ((ran = readFileSync(exe)), true) });
-	assert.deepEqual(await promise, { variant: "x64", from: "npm", signed: true });
+	assert.deepEqual(await promise, { variant: "x64", from: "GitHub", signed: true });
+	assert.deepEqual(asked, [`${GITHUB}/SHA256SUMS`, `${GITHUB}/SHA256SUMS.sig`, `${GITHUB}/pi-bolt-win32-x64.zip`]);
 	assert.deepEqual(ran, EXE, "the new executable ran (--version) before it was installed");
 	assert.deepEqual(readFileSync(join(pkgDir, "bin", "pi-bolt.exe")), EXE);
 	assert.equal(readFileSync(join(pkgDir, "bin", "theme", "dark.json"), "utf8"), "{}\n");
 	assert.ok(existsSync(join(pkgDir, "bin", "native", "win32", "prebuilds", "win32-x64", "win32-platform.node")));
 	assert.ok(existsSync(join(pkgDir, "bin", "pi-bolt.txt")));
 	assert.deepEqual(readdirSync(pkgDir).sort(), ["bin", "package.json"], "the staging folder is gone");
-	assert.ok(!asked.includes(`${GITHUB}/pi-bolt-win32-x64.zip`), "nothing from GitHub but the checksums and their signature");
-	assert.match(log.join("\n"), /installed Pi-Bolt .* from npm, signature verified/);
+	assert.match(log.join("\n"), /installed Pi-Bolt .* from GitHub, signature verified/);
 });
 
-test("Windows: a build from npm that does not match the checksum is not used: GitHub's is, checked the same way", async (t) => {
-	const signer = newKey();
-	const release = makeRelease({ signer });
-	const { fetch } = fakeFetch({ ...githubRoutes(release), [npmUrl()]: npmPackage(buildZip("x64", [{ name: "pi-bolt-win32-x64/evil.dll", data: Buffer.from("x") }])) });
+test("Windows: a missing fork release never falls back to upstream npm", async (t) => {
+	const { fetch, asked } = fakeFetch({ [npmUrl()]: Buffer.from("upstream package") });
 	const pkgDir = makePackage(t);
-	const { promise, log } = run(pkgDir, { fetch, key: signer.key });
-	assert.deepEqual(await promise, { variant: "x64", from: "GitHub", signed: true });
-	assert.ok(!existsSync(join(pkgDir, "bin", "evil.dll")));
-	assert.match(log.join("\n"), /not available from npm; downloading from GitHub instead/);
-});
-
-test("Windows: PIBOLT_SOURCE=npm refuses when npm does not have the build", async (t) => {
-	const signer = newKey();
-	const { fetch } = fakeFetch(githubRoutes(makeRelease({ signer })));
-	const pkgDir = makePackage(t);
-	await assert.rejects(run(pkgDir, { fetch, key: signer.key, env: { PIBOLT_SOURCE: "npm" } }).promise, /npm does not have Pi-Bolt/);
+	await assert.rejects(run(pkgDir, { fetch, key: newKey().key }).promise, /download failed/);
+	assert.deepEqual(asked, [`${GITHUB}/SHA256SUMS`]);
 	assertPlaceholder(pkgDir);
 });
 
-test("Windows: PIBOLT_SOURCE=github downloads from GitHub only", async (t) => {
+test("Windows: explicit npm source is rejected before any request", async (t) => {
+	const { fetch, asked } = fakeFetch({});
+	const pkgDir = makePackage(t);
+	await assert.rejects(run(pkgDir, { fetch, key: newKey().key, env: { PIBOLT_SOURCE: "npm" } }).promise, /PIBOLT_SOURCE=npm.*not supported/i);
+	assert.deepEqual(asked, []);
+	assertPlaceholder(pkgDir);
+});
+
+test("Windows: PIBOLT_SOURCE=github downloads from the fork only", async (t) => {
 	const signer = newKey();
 	const release = makeRelease({ signer });
-	const { fetch, asked } = fakeFetch({ ...githubRoutes(release), [npmUrl()]: npmPackage(release["pi-bolt-win32-x64.zip"]) });
+	const { fetch, asked } = fakeFetch(githubRoutes(release));
 	const pkgDir = makePackage(t);
 	assert.equal((await run(pkgDir, { fetch, key: signer.key, env: { PIBOLT_SOURCE: "github" } }).promise).from, "GitHub");
-	assert.ok(!asked.includes(npmUrl()));
+	assert.deepEqual(asked, [`${GITHUB}/SHA256SUMS`, `${GITHUB}/SHA256SUMS.sig`, `${GITHUB}/pi-bolt-win32-x64.zip`]);
 });
 
 test("Windows: a build from GitHub that does not match the checksum is refused", async (t) => {
@@ -296,7 +455,7 @@ test("Windows: a build from GitHub that does not match the checksum is refused",
 
 test("Windows: checksums signed with another key are refused before anything else is downloaded", async (t) => {
 	const release = makeRelease({ signer: newKey() });
-	const { fetch, asked } = fakeFetch({ ...githubRoutes(release), [npmUrl()]: npmPackage(release["pi-bolt-win32-x64.zip"]) });
+	const { fetch, asked } = fakeFetch(githubRoutes(release));
 	const pkgDir = makePackage(t);
 	await assert.rejects(run(pkgDir, { fetch, key: newKey().key }).promise, /signature does not verify: the download is not Pi-Bolt's/);
 	assert.deepEqual(asked, [`${GITHUB}/SHA256SUMS`, `${GITHUB}/SHA256SUMS.sig`]);
@@ -407,7 +566,7 @@ test("Windows: a release without a Windows build, or without the variant asked f
 	const other = fakeFetch(githubRoutes(makeRelease({ signer })));
 	await assert.rejects(run(makePackage(t), { fetch: other.fetch, key: signer.key, env: { PIBOLT_VARIANT: "x64-jit" } }).promise, /pi-bolt-win32-x64-jit\.zip is not in its SHA256SUMS/);
 	await assert.rejects(run(makePackage(t), { fetch: other.fetch, key: signer.key, env: { PIBOLT_VARIANT: "arm64" } }).promise, /PIBOLT_VARIANT must be x64, x64-baseline or x64-jit/);
-	await assert.rejects(run(makePackage(t), { fetch: other.fetch, key: signer.key, env: { PIBOLT_SOURCE: "ftp" } }).promise, /PIBOLT_SOURCE must be auto, npm or github/);
+	await assert.rejects(run(makePackage(t), { fetch: other.fetch, key: signer.key, env: { PIBOLT_SOURCE: "ftp" } }).promise, /PIBOLT_SOURCE must be auto or github/);
 });
 
 test("Windows: the baseline build on a CPU without AVX2, when the release has one", async (t) => {
@@ -466,22 +625,6 @@ test("Windows: installing again replaces the files that are there", async (t) =>
 	assert.deepEqual(readFileSync(join(pkgDir, "bin", "pi-bolt.exe")), EXE);
 	const leftovers = readdirSync(join(pkgDir, "bin"), { recursive: true }).filter((name) => String(name).endsWith(".pibolt-old"));
 	assert.deepEqual(leftovers, []);
-});
-
-test("the npm package's tar: the file asked for, also under a pax name; false when it is not there", async (t) => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-bolt-npm-test-"));
-	t.after(() => rmSync(dir, { recursive: true, force: true }));
-	const data = crypto.randomBytes(700000);
-	const tgz = join(dir, "a.tgz");
-	writeFileSync(tgz, makeTgz([{ name: "package/a.bin", data: Buffer.from("not this") }, { name: "package/b.zip", data }]));
-	assert.equal(await install.extractFromTgz(tgz, "package/b.zip", join(dir, "out")), true);
-	assert.deepEqual(readFileSync(join(dir, "out")), data);
-	assert.equal(await install.extractFromTgz(tgz, "package/c.zip", join(dir, "none")), false);
-	writeFileSync(tgz, makeTgz([{ name: "package/short", data }], { paxName: `package/${"long-".repeat(30)}b.zip` }));
-	assert.equal(await install.extractFromTgz(tgz, `package/${"long-".repeat(30)}b.zip`, join(dir, "pax")), true);
-	assert.deepEqual(readFileSync(join(dir, "pax")), data);
-	writeFileSync(tgz, "not gzip");
-	assert.equal(await install.extractFromTgz(tgz, "package/b.zip", join(dir, "bad")), false);
 });
 
 test("the checksums' lines, as sha256sum writes them", () => {
