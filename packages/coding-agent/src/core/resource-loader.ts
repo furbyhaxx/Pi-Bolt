@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { detectCapabilities, getTerminalColorMode, type TerminalColorMode } from "@earendil-works/pi-tui";
@@ -34,7 +35,7 @@ import {
 } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
-import { SettingsManager } from "./settings-manager.ts";
+import { SettingsManager, type SettingsManagerSnapshot } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { loadSkills } from "./skills.ts";
 import {
@@ -183,7 +184,79 @@ function omitReplacedExtensions(
 	});
 }
 
+/** A resource discovered by the last successful ordinary reload. */
+export interface ResourceInventoryEntry {
+	readonly id: string;
+	readonly kind: "extension" | "skill" | "prompt" | "theme";
+	readonly path: string;
+	readonly enabled: boolean;
+	readonly sourceInfo: Readonly<SourceInfo>;
+}
+
+/** The immutable identities and provenance of an ordinary resource resolution. */
+export interface ResourceInventory {
+	readonly generation: string;
+	readonly entries: readonly ResourceInventoryEntry[];
+}
+
+interface ResourceFileIdentity {
+	readonly path: string;
+	readonly sourceInfo: Readonly<SourceInfo>;
+}
+
+interface CapturedLoaderOptions {
+	readonly cwd: string;
+	readonly agentDir: string;
+	readonly additionalExtensionPaths: readonly string[];
+	readonly additionalSkillPaths: readonly string[];
+	readonly additionalPromptTemplatePaths: readonly string[];
+	readonly additionalThemePaths: readonly string[];
+	readonly extensionFactories: readonly InlineExtension[];
+	readonly builtinExtensions: readonly BuiltinExtension[];
+	readonly disabledBuiltinExtensions: readonly string[];
+	readonly noExtensions: boolean;
+	readonly noSkills: boolean;
+	readonly noPromptTemplates: boolean;
+	readonly noThemes: boolean;
+	readonly noContextFiles: boolean;
+	readonly systemPrompt?: string;
+	readonly appendSystemPrompt?: readonly string[];
+	readonly skillsOverride?: DefaultResourceLoaderOptions["skillsOverride"];
+	readonly promptsOverride?: DefaultResourceLoaderOptions["promptsOverride"];
+	readonly themesOverride?: DefaultResourceLoaderOptions["themesOverride"];
+	readonly agentsFilesOverride?: DefaultResourceLoaderOptions["agentsFilesOverride"];
+	readonly systemPromptOverride?: DefaultResourceLoaderOptions["systemPromptOverride"];
+	readonly appendSystemPromptOverride?: DefaultResourceLoaderOptions["appendSystemPromptOverride"];
+}
+
+type CapturedPromptInput =
+	| { readonly kind: "file"; readonly path: string }
+	| { readonly kind: "literal"; readonly value: string };
+
+interface OrdinaryResolutionBaseline {
+	readonly inventory: ResourceInventory;
+	readonly settings: SettingsManagerSnapshot;
+	readonly projectTrusted: boolean;
+	readonly options: CapturedLoaderOptions;
+	readonly extensionPaths: readonly { readonly path: string; readonly resolvedPath: string }[];
+	readonly inlineExtensions: readonly { readonly path: string; readonly descriptor: InlineExtension }[];
+	readonly skills: readonly ResourceFileIdentity[];
+	readonly prompts: readonly ResourceFileIdentity[];
+	readonly themes: readonly ResourceFileIdentity[];
+	readonly resolvedResources: readonly {
+		readonly kind: ResourceInventoryEntry["kind"];
+		readonly path: string;
+		readonly enabled: boolean;
+		readonly metadata: Readonly<PathMetadata>;
+	}[];
+	readonly metadataByPath: readonly { readonly path: string; readonly metadata: Readonly<PathMetadata> }[];
+	readonly contextPaths: readonly string[];
+	readonly systemPromptInput?: CapturedPromptInput;
+	readonly appendSystemPromptInputs: readonly CapturedPromptInput[];
+}
+
 export interface ResourceLoader {
+	getResourceInventory?(): ResourceInventory;
 	getExtensions(): LoadExtensionsResult;
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
@@ -404,6 +477,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private lastPromptPaths: string[];
 	private lastThemePaths: string[];
 	private loaded: boolean;
+	private ordinaryBaseline?: OrdinaryResolutionBaseline;
 
 	constructor(options: DefaultResourceLoaderOptions) {
 		this.cwd = resolvePath(options.cwd);
@@ -457,6 +531,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.lastPromptPaths = [];
 		this.lastThemePaths = [];
 		this.loaded = false;
+	}
+
+	getResourceInventory(): ResourceInventory {
+		if (!this.ordinaryBaseline) {
+			throw new Error("Resource inventory is unavailable until a successful ordinary reload");
+		}
+		return this.ordinaryBaseline.inventory;
 	}
 
 	getExtensions(): LoadExtensionsResult {
@@ -563,6 +644,31 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,
 		});
+		const settingsSnapshot = this.settingsManager.createSnapshot();
+		const projectTrusted = this.settingsManager.isProjectTrusted();
+		const capturedOptions = this.captureOptions();
+		const resolvedResources = Object.freeze(
+			(
+				[
+					["extension", resolvedPaths.extensions, cliExtensionPaths.extensions],
+					["skill", resolvedPaths.skills, cliExtensionPaths.skills],
+					["prompt", resolvedPaths.prompts, cliExtensionPaths.prompts],
+					["theme", resolvedPaths.themes, cliExtensionPaths.themes],
+				] as const
+			).flatMap(([kind, ordinary, cli]) =>
+				[...ordinary, ...cli].map((resource) =>
+					Object.freeze({
+						kind,
+						path:
+							kind === "extension"
+								? this.resolveExtensionLoadPath(resource.path)
+								: this.resolveResourcePath(resource.path),
+						enabled: resource.enabled,
+						metadata: Object.freeze({ ...resource.metadata }),
+					}),
+				),
+			),
+		);
 		const installWarnings = collectPackageInstallWarnings(
 			resolvedPaths.installFailures,
 			cliExtensionPaths.installFailures,
@@ -619,6 +725,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 				!this.disabledBuiltinExtensions.has(path.slice(BUILTIN_PATH_PREFIX.length)),
 		);
 
+		const capturedExtensionPaths = Object.freeze(
+			extensionPaths.map((path) => Object.freeze({ path, resolvedPath: this.resolveExtensionLoadPath(path) })),
+		);
 		const packageWarnings = collectExtensionPackageWarnings(extensionPaths, metadataByPath);
 		const extensionsResult = await this.loadFinalExtensionSet(extensionPaths, preTrustExtensions);
 		mergeExtensionWarnings(extensionsResult, [...installWarnings, ...packageWarnings]);
@@ -638,7 +747,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			: this.mergePaths([...cliEnabledSkills, ...enabledSkills], this.additionalSkillPaths);
 
 		this.lastSkillPaths = skillPaths;
-		this.updateSkillsFromPaths(skillPaths, metadataByPath);
+		const ordinarySkills = this.updateSkillsFromPaths(skillPaths, metadataByPath);
 		for (const p of this.additionalSkillPaths) {
 			if (isLocalPath(p)) {
 				const resolved = this.resolveResourcePath(p);
@@ -653,7 +762,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			: this.mergePaths([...cliEnabledPrompts, ...enabledPrompts], this.additionalPromptTemplatePaths);
 
 		this.lastPromptPaths = promptPaths;
-		this.updatePromptsFromPaths(promptPaths, metadataByPath);
+		const ordinaryPrompts = this.updatePromptsFromPaths(promptPaths, metadataByPath);
 		for (const p of this.additionalPromptTemplatePaths) {
 			if (isLocalPath(p)) {
 				const resolved = this.resolveResourcePath(p);
@@ -672,7 +781,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			: this.mergePaths([...cliEnabledThemes, ...enabledThemes], this.additionalThemePaths);
 
 		this.lastThemePaths = themePaths;
-		this.updateThemesFromPaths(themePaths, metadataByPath);
+		const ordinaryThemes = this.updateThemesFromPaths(themePaths, metadataByPath);
 		for (const p of this.additionalThemePaths) {
 			const resolved = this.resolveResourcePath(p);
 			if (!existsSync(resolved) && !this.themeDiagnostics.some((d) => d.path === resolved)) {
@@ -688,10 +797,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 						agentDir: this.agentDir,
 					}),
 		};
+		const contextPaths = Object.freeze(agentsFiles.agentsFiles.map((file) => file.path));
 		const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
 		this.agentsFiles = resolvedAgentsFiles.agentsFiles;
 
 		const systemPromptSource = this.systemPromptSource ?? this.discoverSystemPromptFile();
+		const systemPromptInput = this.capturePromptInput(systemPromptSource);
 		const baseSystemPrompt = resolvePromptInput(systemPromptSource, "system prompt");
 		this.systemPrompt = this.systemPromptOverride ? this.systemPromptOverride(baseSystemPrompt) : baseSystemPrompt;
 		this.systemPromptSourcePath =
@@ -702,6 +813,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const discoveredAppendSystemPromptFile = this.discoverAppendSystemPromptFile();
 			appendSources = discoveredAppendSystemPromptFile ? [discoveredAppendSystemPromptFile] : [];
 		}
+		const appendSystemPromptInputs = Object.freeze(
+			appendSources.map((source) => this.capturePromptInput(source)).filter((source) => source !== undefined),
+		);
 		const baseAppend = appendSources
 			.map((s) => resolvePromptInput(s, "append system prompt"))
 			.filter((s): s is string => s !== undefined);
@@ -711,7 +825,152 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.appendSystemPromptSourcePaths = appendSources
 			.filter((source) => existsSync(source))
 			.map((source) => resolvePath(source));
+		const inlineExtensions = Object.freeze(
+			capturedOptions.extensionFactories.map((descriptor, index) =>
+				Object.freeze({
+					path: `<inline:${typeof descriptor === "function" ? index + 1 : descriptor.name}>`,
+					descriptor,
+				}),
+			),
+		);
+		const inventory = this.createResourceInventory(
+			capturedExtensionPaths,
+			inlineExtensions,
+			ordinarySkills,
+			ordinaryPrompts,
+			ordinaryThemes,
+			resolvedResources,
+			metadataByPath,
+			capturedOptions,
+		);
+		this.ordinaryBaseline = Object.freeze({
+			inventory,
+			settings: settingsSnapshot,
+			projectTrusted,
+			options: capturedOptions,
+			extensionPaths: capturedExtensionPaths,
+			inlineExtensions,
+			skills: ordinarySkills,
+			prompts: ordinaryPrompts,
+			themes: ordinaryThemes,
+			resolvedResources,
+			metadataByPath: Object.freeze(
+				[...metadataByPath].map(([path, metadata]) =>
+					Object.freeze({ path, metadata: Object.freeze({ ...metadata }) }),
+				),
+			),
+			contextPaths,
+			systemPromptInput,
+			appendSystemPromptInputs,
+		});
 		this.loaded = true;
+	}
+
+	private captureOptions(): CapturedLoaderOptions {
+		return Object.freeze({
+			cwd: this.cwd,
+			agentDir: this.agentDir,
+			additionalExtensionPaths: Object.freeze([...this.additionalExtensionPaths]),
+			additionalSkillPaths: Object.freeze([...this.additionalSkillPaths]),
+			additionalPromptTemplatePaths: Object.freeze([...this.additionalPromptTemplatePaths]),
+			additionalThemePaths: Object.freeze([...this.additionalThemePaths]),
+			extensionFactories: Object.freeze(
+				this.extensionFactories.map((factory) =>
+					typeof factory === "function" ? factory : Object.freeze({ ...factory }),
+				),
+			),
+			builtinExtensions: Object.freeze(
+				[...this.builtinExtensions.values()].map((builtin) => Object.freeze({ ...builtin })),
+			),
+			disabledBuiltinExtensions: Object.freeze([...this.disabledBuiltinExtensions]),
+			noExtensions: this.noExtensions,
+			noSkills: this.noSkills,
+			noPromptTemplates: this.noPromptTemplates,
+			noThemes: this.noThemes,
+			noContextFiles: this.noContextFiles,
+			systemPrompt: this.systemPromptSource,
+			appendSystemPrompt: this.appendSystemPromptSource && Object.freeze([...this.appendSystemPromptSource]),
+			skillsOverride: this.skillsOverride,
+			promptsOverride: this.promptsOverride,
+			themesOverride: this.themesOverride,
+			agentsFilesOverride: this.agentsFilesOverride,
+			systemPromptOverride: this.systemPromptOverride,
+			appendSystemPromptOverride: this.appendSystemPromptOverride,
+		});
+	}
+
+	private capturePromptInput(input: string | undefined): CapturedPromptInput | undefined {
+		if (!input) return undefined;
+		return existsSync(input)
+			? Object.freeze({ kind: "file", path: resolvePath(input) })
+			: Object.freeze({ kind: "literal", value: input });
+	}
+
+	private captureResourceFiles(
+		files: Array<{ path: string; sourceInfo?: SourceInfo }>,
+		extraSourceInfos: Map<string, SourceInfo>,
+		metadataByPath?: Map<string, PathMetadata>,
+	): readonly ResourceFileIdentity[] {
+		return Object.freeze(
+			files.map(({ path, sourceInfo }) =>
+				Object.freeze({
+					path,
+					sourceInfo: Object.freeze({
+						...(this.findSourceInfoForPath(path, extraSourceInfos, metadataByPath) ??
+							sourceInfo ??
+							this.getDefaultSourceInfoForPath(path)),
+					}),
+				}),
+			),
+		);
+	}
+
+	private createResourceInventory(
+		extensionPaths: OrdinaryResolutionBaseline["extensionPaths"],
+		inlineExtensions: OrdinaryResolutionBaseline["inlineExtensions"],
+		skills: readonly ResourceFileIdentity[],
+		prompts: readonly ResourceFileIdentity[],
+		themes: readonly ResourceFileIdentity[],
+		resolvedResources: OrdinaryResolutionBaseline["resolvedResources"],
+		metadataByPath: Map<string, PathMetadata>,
+		options: CapturedLoaderOptions,
+	): ResourceInventory {
+		const entries = new Map<string, ResourceInventoryEntry>();
+		const add = (kind: ResourceInventoryEntry["kind"], path: string, enabled: boolean, sourceInfo: SourceInfo) => {
+			const id = createHash("sha256").update(kind).update("\0").update(path).digest("hex");
+			if (!entries.has(id)) {
+				entries.set(id, Object.freeze({ id, kind, path, enabled, sourceInfo: Object.freeze({ ...sourceInfo }) }));
+			}
+		};
+		for (const { path, resolvedPath } of extensionPaths) {
+			const sourceInfo =
+				this.findSourceInfoForPath(path, undefined, metadataByPath) ?? this.getDefaultSourceInfoForPath(path);
+			add("extension", resolvedPath, true, { ...sourceInfo, path: resolvedPath });
+		}
+		for (const { path } of inlineExtensions) {
+			add("extension", path, true, this.getDefaultSourceInfoForPath(path));
+		}
+		for (const [kind, files] of [
+			["skill", skills],
+			["prompt", prompts],
+			["theme", themes],
+		] as const) {
+			for (const file of files) add(kind, file.path, true, file.sourceInfo);
+		}
+		for (const resource of resolvedResources) {
+			const disabledByOption =
+				(resource.kind === "extension" &&
+					(options.noExtensions ||
+						(resource.path.startsWith(BUILTIN_PATH_PREFIX) &&
+							options.disabledBuiltinExtensions.includes(resource.path.slice(BUILTIN_PATH_PREFIX.length))))) ||
+				(resource.kind === "skill" && options.noSkills) ||
+				(resource.kind === "prompt" && options.noPromptTemplates) ||
+				(resource.kind === "theme" && options.noThemes);
+			if (!resource.enabled || disabledByOption) {
+				add(resource.kind, resource.path, false, createSourceInfo(resource.path, resource.metadata));
+			}
+		}
+		return Object.freeze({ generation: randomUUID(), entries: Object.freeze([...entries.values()]) });
 	}
 
 	private async loadCurrentExtensionSet(options: { includeInlineFactories: boolean }): Promise<LoadExtensionsResult> {
@@ -878,7 +1137,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 		});
 	}
 
-	private updateSkillsFromPaths(skillPaths: string[], metadataByPath?: Map<string, PathMetadata>): void {
+	private updateSkillsFromPaths(
+		skillPaths: string[],
+		metadataByPath?: Map<string, PathMetadata>,
+	): readonly ResourceFileIdentity[] {
 		let skillsResult: { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 		if (this.noSkills && skillPaths.length === 0) {
 			skillsResult = { skills: [], diagnostics: [] };
@@ -890,6 +1152,16 @@ export class DefaultResourceLoader implements ResourceLoader {
 				includeDefaults: false,
 			});
 		}
+		const ordinarySkills = this.captureResourceFiles(
+			[
+				...skillsResult.skills.map((skill) => ({ path: skill.filePath, sourceInfo: skill.sourceInfo })),
+				...skillsResult.diagnostics.flatMap((diagnostic) =>
+					diagnostic.type === "collision" && diagnostic.path ? [{ path: diagnostic.path }] : [],
+				),
+			],
+			this.extensionSkillSourceInfos,
+			metadataByPath,
+		);
 		const resolvedSkills = this.skillsOverride ? this.skillsOverride(skillsResult) : skillsResult;
 		this.skills = resolvedSkills.skills.map((skill) => ({
 			...skill,
@@ -899,10 +1171,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 				this.getDefaultSourceInfoForPath(skill.filePath),
 		}));
 		this.skillDiagnostics = resolvedSkills.diagnostics;
+		return ordinarySkills;
 	}
 
-	private updatePromptsFromPaths(promptPaths: string[], metadataByPath?: Map<string, PathMetadata>): void {
+	private updatePromptsFromPaths(
+		promptPaths: string[],
+		metadataByPath?: Map<string, PathMetadata>,
+	): readonly ResourceFileIdentity[] {
 		let promptsResult: { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
+		let ordinaryPrompts: readonly ResourceFileIdentity[] = Object.freeze([]);
 		if (this.noPromptTemplates && promptPaths.length === 0) {
 			promptsResult = { prompts: [], diagnostics: [] };
 		} else {
@@ -912,6 +1189,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 				promptPaths,
 				includeDefaults: false,
 			});
+			ordinaryPrompts = this.captureResourceFiles(
+				loaded.templates.map((prompt) => ({ path: prompt.filePath, sourceInfo: prompt.sourceInfo })),
+				this.extensionPromptSourceInfos,
+				metadataByPath,
+			);
 			const deduped = this.dedupePrompts(loaded.templates);
 			promptsResult = {
 				prompts: deduped.prompts,
@@ -927,10 +1209,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 				this.getDefaultSourceInfoForPath(prompt.filePath),
 		}));
 		this.promptDiagnostics = resolvedPrompts.diagnostics;
+		return ordinaryPrompts;
 	}
 
-	private updateThemesFromPaths(themePaths: string[], metadataByPath?: Map<string, PathMetadata>): void {
+	private updateThemesFromPaths(
+		themePaths: string[],
+		metadataByPath?: Map<string, PathMetadata>,
+	): readonly ResourceFileIdentity[] {
 		let themesResult: { themes: Theme[]; diagnostics: ResourceDiagnostic[] };
+		let ordinaryThemes: readonly ResourceFileIdentity[] = Object.freeze([]);
 		if (this.noThemes && themePaths.length === 0) {
 			themesResult = { themes: [], diagnostics: [] };
 		} else {
@@ -940,6 +1227,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 				...this.settingsManager.getTerminalCapabilityOverrides(),
 			});
 			const loaded = this.loadThemes(themePaths, false, colorMode);
+			ordinaryThemes = this.captureResourceFiles(
+				loaded.themes.flatMap((theme) =>
+					theme.sourcePath ? [{ path: theme.sourcePath, sourceInfo: theme.sourceInfo }] : [],
+				),
+				this.extensionThemeSourceInfos,
+				metadataByPath,
+			);
 			const deduped = this.dedupeThemes(loaded.themes);
 			themesResult = { themes: deduped.themes, diagnostics: [...loaded.diagnostics, ...deduped.diagnostics] };
 		}
@@ -954,6 +1248,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			return theme;
 		});
 		this.themeDiagnostics = resolvedThemes.diagnostics;
+		return ordinaryThemes;
 	}
 
 	private applyExtensionSourceInfo(extensions: Extension[], metadataByPath: Map<string, PathMetadata>): void {
