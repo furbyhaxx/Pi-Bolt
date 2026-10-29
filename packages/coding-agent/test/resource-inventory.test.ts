@@ -362,6 +362,56 @@ describe("ordinary resource inventory", () => {
 		expect(settingsManager.getGlobalSettings()).toEqual(settingsBefore);
 	});
 
+	it("keeps rejected skills outside the frozen inventory until an ordinary reload accepts them", async () => {
+		const skillRoot = join(root, "eligibility-skills");
+		const malformed = join(skillRoot, "malformed", "SKILL.md");
+		const missingDescription = join(skillRoot, "missing-description", "SKILL.md");
+		const invalidName = join(skillRoot, "invalid-name", "SKILL.md");
+		for (const dir of ["malformed", "missing-description", "invalid-name"]) {
+			mkdirSync(join(skillRoot, dir), { recursive: true });
+		}
+		writeFileSync(malformed, "---\nname: [unterminated\ndescription: Broken\n---\nContent");
+		writeFileSync(missingDescription, "---\nname: missing-description\n---\nContent");
+		writeFileSync(invalidName, "---\nname: INVALID_name\ndescription: Usable\n---\nContent");
+
+		const loader = new DefaultResourceLoader({ cwd, agentDir, additionalSkillPaths: [skillRoot] });
+		await loader.reload();
+		const inventory = loader.getResourceInventory();
+		const snapshot = structuredClone(inventory);
+		const skillEntries = inventory.entries.filter(
+			(entry) => entry.kind === "skill" && entry.path.startsWith(skillRoot),
+		);
+		expect(skillEntries.map((entry) => entry.path)).toEqual([invalidName]);
+		expect(skillEntries[0]).toMatchObject({ enabled: true });
+		expect(loader.getSkills().skills.map((skill) => skill.filePath)).toContain(invalidName);
+		for (const path of [malformed, missingDescription, invalidName]) {
+			expect(loader.getSkills().diagnostics).toContainEqual(expect.objectContaining({ type: "warning", path }));
+		}
+		expect(Object.isFrozen(inventory)).toBe(true);
+		expect(Object.isFrozen(inventory.entries)).toBe(true);
+		expect(Object.isFrozen(skillEntries[0])).toBe(true);
+		expect(Object.isFrozen(skillEntries[0].sourceInfo)).toBe(true);
+
+		writeFileSync(malformed, "---\nname: repaired-malformed\ndescription: Fixed\n---\nContent");
+		writeFileSync(missingDescription, "---\nname: repaired-missing\ndescription: Fixed\n---\nContent");
+		expect(loader.getResourceInventory()).toBe(inventory);
+		expect(loader.getResourceInventory()).toEqual(snapshot);
+		expect(inventory.entries.some((entry) => entry.path === malformed || entry.path === missingDescription)).toBe(
+			false,
+		);
+
+		await loader.reload();
+		const next = loader.getResourceInventory();
+		expect(next.generation).not.toBe(inventory.generation);
+		for (const path of [malformed, missingDescription, invalidName]) {
+			expect(next.entries.find((entry) => entry.kind === "skill" && entry.path === path)).toMatchObject({
+				enabled: true,
+			});
+		}
+		expect(next.entries.find((entry) => entry.path === invalidName)?.id).toBe(skillEntries[0].id);
+		expect(inventory).toEqual(snapshot);
+	});
+
 	it("does not publish an inventory when the first reload fails", async () => {
 		const loader = new DefaultResourceLoader({
 			cwd,

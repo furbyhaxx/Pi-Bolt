@@ -193,7 +193,11 @@ export interface ResourceInventoryEntry {
 	readonly sourceInfo: Readonly<SourceInfo>;
 }
 
-/** The immutable identities and provenance of an ordinary resource resolution. */
+/**
+ * Immutable identities from ordinary resolution. Enabled skill, prompt and theme files are those
+ * accepted during loading, before name deduplication and overrides; disabled paths may also appear.
+ * File contents may be reread, but excluded files require another ordinary reload to enter the inventory.
+ */
 export interface ResourceInventory {
 	readonly generation: string;
 	readonly entries: readonly ResourceInventoryEntry[];
