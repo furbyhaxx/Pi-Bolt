@@ -81,14 +81,16 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with Homebrew
 		expect(piBoltInstallMethod()).toBe("installer");
 		runningFrom("/Users/me/.pi-bolt/pi-bolt-darwin-arm64/pi-bin");
 		expect(piBoltInstallMethod()).toBe("installer");
-		expect(piBoltUpdateCommand("homebrew")).toBe("brew upgrade pi-bolt");
+		expect(piBoltUpdateCommand("homebrew")).toBe(
+			"curl -fsSL https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.sh | sh",
+		);
 		expect(piBoltUpdateCommand("installer")).toBe("pi-bolt update");
 		expect(piBoltJitSwitchCommand("homebrew", "darwin", "arm64-jit")).toBe(
-			"brew uninstall pi-bolt && curl -fsSL https://pi-bolt.opensec.in/install.sh | PIBOLT_VARIANT=arm64-jit sh",
+			"brew uninstall pi-bolt && curl -fsSL https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.sh | PIBOLT_VARIANT=arm64-jit sh",
 		);
 	});
 
-	it("update says to run brew upgrade, and changes nothing", async () => {
+	it("update identifies unsupported Homebrew and gives the fork installer without changing the keg", async () => {
 		const libexec = brewInstall(join(dir, "homebrew"));
 		runningFrom(join(libexec, "pi-bin"));
 		const before = filesIn(keg);
@@ -96,8 +98,11 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with Homebrew
 		vi.spyOn(console, "error").mockImplementation(() => {});
 		expect(await handlePackageCommand(["update", "--self"])).toBe(true);
 		const output = log.mock.calls.flat().join("\n");
-		expect(output).toContain("This Pi-Bolt was installed with Homebrew");
-		expect(output).toContain("brew upgrade pi-bolt");
+		expect(output).toContain("This Pi-Bolt was installed with Homebrew (unsupported by this fork)");
+		expect(output).toContain(
+			"curl -fsSL https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.sh | sh",
+		);
+		expect(output).not.toContain("brew upgrade pi-bolt");
 		expect(output).not.toContain("Updating Pi-Bolt");
 		expect(process.exitCode).toBe(1);
 		expect(filesIn(keg)).toEqual(before);
@@ -110,8 +115,11 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with Homebrew
 		const error = vi.spyOn(console, "error").mockImplementation(() => {});
 		expect(await handlePackageCommand(["update", "--rollback"])).toBe(true);
 		expect(process.exitCode).toBe(1);
-		expect(error.mock.calls.flat().join("\n")).toContain("installed with Homebrew");
-		expect(error.mock.calls.flat().join("\n")).toContain("brew uninstall pi-bolt");
+		const output = error.mock.calls.flat().join("\n");
+		expect(output).toContain("installed with Homebrew (unsupported by this fork)");
+		expect(output).toContain(
+			"brew uninstall pi-bolt && curl -fsSL https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.sh | PIBOLT_VERSION=bolt-v<version> sh",
+		);
 		expect(filesIn(keg)).toEqual(before);
 	});
 
@@ -123,7 +131,7 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with Homebrew
 		const installAgain = vi.fn(async () => true);
 		expect(await runPiBoltCompile([], installAgain)).toBe(1);
 		expect(error.mock.calls.flat().join("\n")).toContain(
-			"this Pi-Bolt was installed with Homebrew, whose folder brew owns",
+			"this Pi-Bolt was installed with Homebrew (unsupported by this fork), whose folder brew owns",
 		);
 		expect(installAgain).not.toHaveBeenCalled();
 		expect(filesIn(keg)).toEqual(before);
@@ -145,7 +153,9 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with Homebrew
 			return true;
 		});
 		expect(await runDoctor(["--offline"], { cwd: home, agentDir, extensionFactories: [] })).toBe(0);
-		expect(output).toMatch(/installed +Homebrew \(the opensec-git\/tap\/pi-bolt formula\), run from .*libexec/);
+		expect(output).toMatch(
+			/installed +Homebrew \(unsupported by this fork\) \(unsupported by this fork; use the GitHub installer\), run from .*libexec/,
+		);
 		expect(output).toContain("(this Pi-Bolt)");
 	});
 });

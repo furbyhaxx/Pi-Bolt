@@ -78,9 +78,11 @@ describe("a Pi-Bolt installed with Scoop", () => {
 		expect(piBoltInstallMethod()).toBe("installer");
 		runningFrom("C:\\Users\\me\\.pi-bolt\\pi-bolt-win32-x64\\pi-bolt.exe");
 		expect(piBoltInstallMethod()).toBe("installer");
-		expect(piBoltUpdateCommand("scoop")).toBe("scoop update pi-bolt");
+		expect(piBoltUpdateCommand("scoop")).toBe(
+			'powershell -c "irm https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.ps1 | iex"',
+		);
 		expect(piBoltJitSwitchCommand("scoop", "win32", "x64-jit")).toBe(
-			'scoop uninstall pi-bolt; $env:PIBOLT_VARIANT = "x64-jit"; irm https://pi-bolt.opensec.in/install.ps1 | iex',
+			'scoop uninstall pi-bolt; $env:PIBOLT_VARIANT = "x64-jit"; irm https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.ps1 | iex',
 		);
 	});
 
@@ -95,15 +97,18 @@ describe("a Pi-Bolt installed with Scoop", () => {
 		expect(piBoltInstallMethod()).toBe("scoop");
 	});
 
-	it("update says to run scoop update, and changes nothing", async () => {
+	it("update identifies unsupported Scoop and gives the fork installer without changing the app", async () => {
 		runningFrom(join(scoopInstall(join(dir, "scoop")), "pi-bolt.exe"));
 		const before = filesIn(app);
 		const log = vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
 		expect(await handlePackageCommand(["update", "--self"])).toBe(true);
 		const output = log.mock.calls.flat().join("\n");
-		expect(output).toContain("This Pi-Bolt was installed with Scoop");
-		expect(output).toContain("scoop update pi-bolt");
+		expect(output).toContain("This Pi-Bolt was installed with Scoop (unsupported by this fork)");
+		expect(output).toContain(
+			'powershell -c "irm https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.ps1 | iex"',
+		);
+		expect(output).not.toContain("scoop update pi-bolt");
 		expect(output).not.toContain("Updating Pi-Bolt");
 		expect(process.exitCode).toBe(1);
 		expect(filesIn(app)).toEqual(before);
@@ -135,6 +140,8 @@ describe("a Pi-Bolt installed with Scoop", () => {
 			return true;
 		});
 		expect(await runDoctor(["--offline"], { cwd: home, agentDir, extensionFactories: [] })).toBe(0);
-		expect(output).toMatch(/installed +Scoop \(the opensec-git\/pi-bolt manifest\), run from .*1\.0\.0/);
+		expect(output).toMatch(
+			/installed +Scoop \(unsupported by this fork\) \(unsupported by this fork; use the GitHub installer\), run from .*1\.0\.0/,
+		);
 	});
 });

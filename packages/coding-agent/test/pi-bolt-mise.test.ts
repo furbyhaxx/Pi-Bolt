@@ -21,7 +21,8 @@ vi.mock("../src/utils/version-check.ts", async (importOriginal) => ({
 	getLatestPiRelease: async () => ({ version: "1.0.1" }),
 }));
 
-const GITHUB_TOOL = "github:opensec-git/Pi-Bolt";
+const GITHUB_TOOL = "github:furbyhaxx/Pi-Bolt";
+const INSTALL_COMMAND = "curl -fsSL https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.sh | sh";
 const realExecPath = process.execPath;
 let dir: string;
 let installs: string;
@@ -31,11 +32,11 @@ function runningFrom(execPath: string): void {
 }
 
 /**
- * What `mise use github:opensec-git/Pi-Bolt` installs (with the options in docs: the release's archive, `pi` renamed to
+ * What `mise use github:furbyhaxx/Pi-Bolt` installs (with the options in docs: the release's archive, `pi` renamed to
  * `pi-bolt`, and only that on PATH): the archive's folder, unpacked into <data>/installs/<tool folder>/<version>, with links
  * for the version prefixes. Returns the folder; pi-bolt there starts pi-bin beside it.
  */
-function miseInstall(data: string, toolFolder = "github-opensec-git-pi-bolt"): string {
+function miseInstall(data: string, toolFolder = "github-furbyhaxx-pi-bolt"): string {
 	installs = join(data, "installs", toolFolder);
 	const version = join(installs, "1.0.0");
 	mkdirSync(join(version, ".mise-bins"), { recursive: true });
@@ -82,8 +83,9 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with mise", (
 		runningFrom("/home/me/.local/share/mise/installs/pi-bolt/1.0.0/pi-bin");
 		expect(piBoltInstallMethod()).toBe("mise");
 		expect(piBoltMiseTool()).toBe("pi-bolt");
-		runningFrom("C:\\Users\\me\\AppData\\Local\\mise\\installs\\github-opensec-git-pi-bolt\\1.0.0\\pi-bolt.exe");
+		runningFrom("C:\\Users\\me\\AppData\\Local\\mise\\installs\\github-furbyhaxx-pi-bolt\\1.0.0\\pi-bolt.exe");
 		expect(piBoltInstallMethod()).toBe("mise");
+		expect(piBoltMiseTool()).toBe(GITHUB_TOOL);
 		// Another tool of mise's, and the installer's folder, are not.
 		runningFrom("/home/me/.local/share/mise/installs/node/24.0.0/bin/node");
 		expect(piBoltInstallMethod()).toBe("installer");
@@ -92,7 +94,7 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with mise", (
 		runningFrom(join(version, "pi-bin"));
 		expect(piBoltUpdateCommand("mise")).toBe(`mise upgrade --bump ${GITHUB_TOOL}`);
 		expect(piBoltJitSwitchCommand("mise", "darwin", "arm64-jit")).toBe(
-			`mise unuse -g ${GITHUB_TOOL} && curl -fsSL https://pi-bolt.opensec.in/install.sh | PIBOLT_VARIANT=arm64-jit sh`,
+			`mise unuse -g ${GITHUB_TOOL} && curl -fsSL https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.sh | PIBOLT_VARIANT=arm64-jit sh`,
 		);
 	});
 
@@ -102,10 +104,50 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with mise", (
 		expect(piBoltInstallMethod()).toBe("installer");
 		vi.stubEnv("MISE_DATA_DIR", join(dir, "tools"));
 		expect(piBoltInstallMethod()).toBe("mise");
-		expect(piBoltUpdateCommand()).toBe("mise upgrade --bump pi-bolt");
+		expect(piBoltUpdateCommand()).toBe(INSTALL_COMMAND);
 	});
 
-	it("update says to run mise upgrade, and changes nothing", async () => {
+	it.each([
+		["github-opensec-git-pi-bolt", "github:opensec-git/Pi-Bolt"],
+		["pi-bolt", "pi-bolt"],
+	])("an unsupported %s source directs updates to the fork installer", async (folder, tool) => {
+		runningFrom(join(miseInstall(join(dir, "mise"), folder), "pi-bin"));
+		const before = filesIn(installs);
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		expect(piBoltMiseTool()).toBe(tool);
+		expect(await handlePackageCommand(["update", "--self"])).toBe(true);
+		const output = log.mock.calls.flat().join("\n");
+		expect(output).toContain("mise (this source is unsupported by the fork)");
+		expect(output).toContain(INSTALL_COMMAND);
+		expect(output).not.toContain(`mise upgrade --bump ${tool}`);
+		expect(output).not.toContain("Updating Pi-Bolt");
+		expect(piBoltJitSwitchCommand("mise", "darwin", "arm64-jit")).toBe(
+			`mise unuse -g ${tool} && curl -fsSL https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.sh | PIBOLT_VARIANT=arm64-jit sh`,
+		);
+		expect(process.exitCode).toBe(1);
+		expect(filesIn(installs)).toEqual(before);
+	});
+
+	it.each([
+		["github-opensec-git-pi-bolt", "github:opensec-git/Pi-Bolt"],
+		["pi-bolt", "pi-bolt"],
+	])("rollback from unsupported %s directs to the fork installer", async (folder, tool) => {
+		runningFrom(join(miseInstall(join(dir, "mise"), folder), "pi-bin"));
+		const before = filesIn(installs);
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		expect(await handlePackageCommand(["update", "--rollback"])).toBe(true);
+		const output = error.mock.calls.flat().join("\n");
+		expect(output).toContain("mise (this source is unsupported by the fork)");
+		expect(output).toContain(
+			`mise unuse -g ${tool} && curl -fsSL https://github.com/furbyhaxx/Pi-Bolt/releases/latest/download/install.sh | PIBOLT_VERSION=bolt-v<version> sh`,
+		);
+		expect(output).not.toContain(`mise use -g ${tool}@<version>`);
+		expect(process.exitCode).toBe(1);
+		expect(filesIn(installs)).toEqual(before);
+	});
+
+	it("update says to run mise upgrade for the fork, and changes nothing", async () => {
 		runningFrom(join(miseInstall(join(dir, "mise")), "pi-bin"));
 		const before = filesIn(installs);
 		const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -160,6 +202,6 @@ describe.skipIf(process.platform === "win32")("a Pi-Bolt installed with mise", (
 			return true;
 		});
 		expect(await runDoctor(["--offline"], { cwd: home, agentDir, extensionFactories: [] })).toBe(0);
-		expect(output).toMatch(/installed +mise \(github:opensec-git\/Pi-Bolt\), run from .*1\.0\.0/);
+		expect(output).toMatch(/installed +mise \(github:furbyhaxx\/Pi-Bolt\), run from .*1\.0\.0/);
 	});
 });
