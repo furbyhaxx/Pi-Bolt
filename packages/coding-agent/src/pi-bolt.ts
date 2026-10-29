@@ -1,5 +1,5 @@
 /**
- * Pi-Bolt: Pi compiled ahead of time (https://github.com/opensec-git/Pi-Bolt).
+ * Pi-Bolt: Pi compiled ahead of time.
  *
  * scripts/build-pi.sh defines PIBOLT_BUILD when it compiles this tree ("0.3.1 x64 jit-off e0f307e3d3f66944": the Pi-Bolt
  * version, the CPU variant (x64, x64-baseline, x64-jit, arm64), whether the JIT is on, and the runtime stamp of the engine it
@@ -9,6 +9,7 @@
 import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { PIBOLT_FORK } from "./pi-bolt-fork.generated.ts";
 
 declare const PIBOLT_BUILD: string | undefined;
 
@@ -23,8 +24,7 @@ export const PIBOLT: PiBoltBuild | undefined = parsePiBoltBuild(
 	typeof PIBOLT_BUILD === "string" ? PIBOLT_BUILD : undefined,
 );
 
-export const PIBOLT_INSTALL_URL =
-	process.platform === "win32" ? "https://pi-bolt.opensec.in/install.ps1" : "https://pi-bolt.opensec.in/install.sh";
+export const PIBOLT_INSTALL_URL = process.platform === "win32" ? PIBOLT_FORK.installPs1Url : PIBOLT_FORK.installShUrl;
 // TLS 1.2 before the first download: Windows PowerShell 5.1 on an older Windows 10 offers only TLS 1.0 by default, which the
 // site refuses, and the installer turns it on only once it is running. Only for the update's own process: the command shown to
 // users is the plain one (README), which Windows' antivirus does not mistake for a downloader.
@@ -85,19 +85,16 @@ export function piBoltInstallerProcess(installerFile?: string): { command: strin
 		],
 	};
 }
-export const PIBOLT_RELEASES_URL = "https://github.com/opensec-git/Pi-Bolt/releases";
+export const PIBOLT_RELEASES_URL = PIBOLT_FORK.releasesUrl;
 /** The key releases' SHA256SUMS are signed with (keys/release.pub; the installers carry it too). */
-export const PIBOLT_RELEASE_KEY = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAoLboJqtKaoISPqffk03vHZr+1sRBG3uIRIWeKOew+aY=
------END PUBLIC KEY-----
-`;
-/** Redirects to the latest release's page (.../releases/tag/bolt-v1.0.2); not counted against GitHub's API limit. */
-export const PIBOLT_LATEST_RELEASE_URL = `${PIBOLT_RELEASES_URL}/latest`;
+export const PIBOLT_RELEASE_KEY = PIBOLT_FORK.releasePublicKey;
+/** Redirects to the latest release's page; not counted against GitHub's API limit. */
+export const PIBOLT_LATEST_RELEASE_URL = PIBOLT_FORK.latestReleaseUrl;
 /** The releases, pre-releases among them, as an Atom feed; not counted against GitHub's API limit either. */
-export const PIBOLT_RELEASES_FEED = `${PIBOLT_RELEASES_URL}.atom`;
-export const PIBOLT_LATEST_RELEASE_API = "https://api.github.com/repos/opensec-git/Pi-Bolt/releases/latest";
+export const PIBOLT_RELEASES_FEED = PIBOLT_FORK.releasesFeed;
+export const PIBOLT_LATEST_RELEASE_API = PIBOLT_FORK.latestReleaseApi;
 /** The releases, newest first, pre-releases among them (drafts are not shown to anyone without write access). */
-export const PIBOLT_RELEASES_API = "https://api.github.com/repos/opensec-git/Pi-Bolt/releases?per_page=30";
+export const PIBOLT_RELEASES_API = PIBOLT_FORK.releasesApi;
 
 /**
  * Which releases `pi-bolt update` takes: `stable`, the latest release; or `beta`, the newest one, pre-releases included (a
@@ -142,8 +139,10 @@ export function parsePiBoltBuild(build: string | undefined): PiBoltBuild | undef
 /** "0.3.1" from the release tag "bolt-v0.3.1"; undefined for anything else. */
 export function piBoltVersionOfTag(tag: unknown): string | undefined {
 	if (typeof tag !== "string") return undefined;
-	const match = /^bolt-v(\d+\.\d+\.\d+)$/.exec(tag.trim());
-	return match ? match[1] : undefined;
+	const trimmed = tag.trim();
+	if (!trimmed.startsWith(PIBOLT_FORK.tagPrefix)) return undefined;
+	const version = trimmed.slice(PIBOLT_FORK.tagPrefix.length);
+	return /^\d+\.\d+\.\d+$/.test(version) ? version : undefined;
 }
 
 export type PiBoltPackageManagerId = "homebrew" | "scoop" | "mise";
@@ -187,15 +186,18 @@ function isScoopPath(path: string): boolean {
 
 /**
  * The tool a Pi-Bolt that mise installed goes by, from the folder mise put it in, <data>/installs/<folder>/<version>: <data> is
- * ~/.local/share/mise (%LOCALAPPDATA%\mise on Windows) or $MISE_DATA_DIR, and <folder> is `pi-bolt` for the registry's
- * shorthand or `github-opensec-git-pi-bolt` for `github:opensec-git/Pi-Bolt`. Undefined if mise did not install it.
+ * ~/.local/share/mise (%LOCALAPPDATA%\mise on Windows) or $MISE_DATA_DIR. Undefined if mise did not install it.
  */
 export function piBoltMiseTool(path: string = realPathOf(process.execPath)): string | undefined {
 	let folder = /[\\/]mise[\\/]installs[\\/]([^\\/]+)[\\/]/.exec(path)?.[1];
 	const dataDir = process.env.MISE_DATA_DIR;
 	if (folder === undefined && dataDir) folder = pathInside(path, join(dataDir, "installs"))?.split("/")[0];
 	if (!folder || !/pi-bolt/i.test(folder)) return undefined;
-	return folder.startsWith("github-") ? "github:opensec-git/Pi-Bolt" : "pi-bolt";
+	for (const repository of [PIBOLT_FORK.repository, PIBOLT_FORK.upstreamRepository]) {
+		if (folder.toLowerCase() === `github-${repository.replace("/", "-")}`.toLowerCase())
+			return `github:${repository}`;
+	}
+	return folder;
 }
 
 /**
@@ -223,11 +225,11 @@ export interface PiBoltPackageManager {
 	name: string;
 	/** Its command: "brew". */
 	command: string;
-	/** What it installed Pi-Bolt from: "the opensec-git/tap/pi-bolt formula". */
+	/** What it installed Pi-Bolt from. */
 	source: string;
 	update: string;
 	uninstall: string;
-	/** The command that switches to another version; undefined for Homebrew, whose formula has the latest release only. */
+	/** The command that switches to another version, when the manager supports this fork. */
 	switchVersion?: string;
 }
 
@@ -238,32 +240,33 @@ export function piBoltPackageManager(
 	switch (method) {
 		case "homebrew":
 			return {
-				name: "Homebrew",
+				name: "Homebrew (unsupported by this fork)",
 				command: "brew",
-				source: "the opensec-git/tap/pi-bolt formula",
-				update: "brew upgrade pi-bolt",
+				source: "unsupported by this fork; use the GitHub installer",
+				update: `curl -fsSL ${PIBOLT_FORK.installShUrl} | sh`,
 				uninstall: "brew uninstall pi-bolt",
 			};
 		case "scoop":
 			// (Scoop keeps the versions it updated from, until `scoop cleanup`: reset switches to one.)
 			return {
-				name: "Scoop",
+				name: "Scoop (unsupported by this fork)",
 				command: "scoop",
-				source: "the opensec-git/pi-bolt manifest",
-				update: "scoop update pi-bolt",
+				source: "unsupported by this fork; use the GitHub installer",
+				update: `powershell -c "irm ${PIBOLT_FORK.installPs1Url} | iex"`,
 				uninstall: "scoop uninstall pi-bolt",
 				switchVersion: "scoop reset pi-bolt@<version>",
 			};
 		case "mise": {
 			// (--bump: a version pinned in mise's config, as `mise use tool@1.0.0` writes it, is otherwise kept.)
 			const tool = piBoltMiseTool() ?? "pi-bolt";
+			const forkTool = `github:${PIBOLT_FORK.repository}`;
 			return {
-				name: "mise",
+				name: tool === forkTool ? "mise" : "mise (this source is unsupported by the fork)",
 				command: "mise",
 				source: tool,
-				update: `mise upgrade --bump ${tool}`,
+				update: tool === forkTool ? `mise upgrade --bump ${forkTool}` : PIBOLT_INSTALL_COMMAND,
 				uninstall: `mise unuse -g ${tool}`,
-				switchVersion: `mise use -g ${tool}@<version>`,
+				...(tool === forkTool ? { switchVersion: `mise use -g ${forkTool}@<version>` } : {}),
 			};
 		}
 		default:
@@ -271,9 +274,9 @@ export function piBoltPackageManager(
 	}
 }
 
-/** The command that updates this Pi-Bolt: its package manager's (`brew upgrade pi-bolt`), else `pi-bolt update`. */
+/** The command that updates this Pi-Bolt or installs the fork when its package manager is unsupported. */
 export function piBoltUpdateCommand(method: PiBoltInstallMethod = piBoltInstallMethod()): string {
-	return piBoltPackageManager(method)?.update ?? "pi-bolt update";
+	return method === "npm" ? PIBOLT_INSTALL_COMMAND : (piBoltPackageManager(method)?.update ?? "pi-bolt update");
 }
 
 /**
@@ -287,13 +290,11 @@ export function piBoltInstallDir(): string | undefined {
 }
 
 /**
- * The installers' variables an update passes on from the user's environment: which releases updates take, where the npm
- * registry is (what comes from it is checked against the signed checksums), how many connections, where `pi-bolt` is linked,
- * the extensions, and Termux's LD_PRELOAD, which Pi-Bolt gives back to the programs it starts.
+ * The installers' variables an update passes on from the user's environment: which releases updates take, how many connections,
+ * where `pi-bolt` is linked, the extensions, and Termux's LD_PRELOAD, which Pi-Bolt gives back to the programs it starts.
  */
 const PIBOLT_UPDATE_PASSED_ON = new Set([
 	"PIBOLT_CHANNEL",
-	"PIBOLT_NPM_REGISTRY",
 	"PIBOLT_CONNECTIONS",
 	"PIBOLT_BIN_DIR",
 	"PIBOLT_EXTENSIONS",
@@ -319,7 +320,7 @@ export function piBoltUpdateEnvironment(version: string): NodeJS.ProcessEnv {
 		PIBOLT_NO_START: "1",
 		PIBOLT_NO_PATH: "1",
 		PIBOLT_VARIANT: PIBOLT?.variant ?? "x64",
-		PIBOLT_VERSION: `bolt-v${version}`,
+		PIBOLT_VERSION: `${PIBOLT_FORK.tagPrefix}${version}`,
 		PIBOLT_INSTALL: piBoltInstallDir() ?? process.env.PIBOLT_INSTALL ?? join(homedir(), ".pi-bolt"),
 	};
 }
@@ -331,29 +332,20 @@ export function piBoltJitVariant(variant: string = PIBOLT?.variant ?? "x64"): st
 }
 
 /**
- * The command that installs the JIT build in place of this one, as it was installed: the installer with PIBOLT_VARIANT (which
- * keeps the default build's folder, and links `pi-bolt` to the new one), or for npm, PIBOLT_VARIANT where the package reads it
- * (every run on macOS and Linux; when it is installed on Windows). One a package manager installed is uninstalled for the
- * installer's.
+ * The command that installs the JIT build with the fork's installer. Homebrew, Scoop and mise installations are uninstalled first.
  */
 export function piBoltJitSwitchCommand(
 	method: PiBoltInstallMethod = piBoltInstallMethod(),
 	platform: NodeJS.Platform = process.platform,
 	variant: string = piBoltJitVariant(),
 ): string {
-	if (method === "npm") {
-		return platform === "win32"
-			? `$env:PIBOLT_VARIANT = "${variant}"; npm install -g --allow-scripts=pi-bolt pi-bolt`
-			: `export PIBOLT_VARIANT=${variant} (in your shell profile)`;
-	}
-	// (Homebrew, Scoop and mise install the default build only: the JIT build comes from the installer, in place of theirs.
-	// Windows PowerShell 5.1 has no &&.)
+	// Windows PowerShell 5.1 has no &&.
 	const manager = piBoltPackageManager(method);
 	if (platform === "win32") {
-		const installer = `$env:PIBOLT_VARIANT = "${variant}"; irm https://pi-bolt.opensec.in/install.ps1 | iex`;
+		const installer = `$env:PIBOLT_VARIANT = "${variant}"; irm ${PIBOLT_FORK.installPs1Url} | iex`;
 		return manager ? `${manager.uninstall}; ${installer}` : installer;
 	}
-	const installer = `curl -fsSL https://pi-bolt.opensec.in/install.sh | PIBOLT_VARIANT=${variant} sh`;
+	const installer = `curl -fsSL ${PIBOLT_FORK.installShUrl} | PIBOLT_VARIANT=${variant} sh`;
 	return manager ? `${manager.uninstall} && ${installer}` : installer;
 }
 

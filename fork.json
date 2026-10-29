@@ -1,0 +1,7 @@
+{
+	"repository": "furbyhaxx/Pi-Bolt",
+	"upstreamRepository": "opensec-git/Pi-Bolt",
+	"upstreamBranch": "pi-bolt",
+	"tagPrefix": "bolt-v",
+	"publicKeyFile": "keys/release.pub"
+}
