@@ -685,11 +685,16 @@ async function loadExtension(
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
 	cacheToken?: ExtensionCacheToken,
+	options?: LoadExtensionsOptions,
 ): Promise<{ extension: Extension | null; error: string | null; warning?: string }> {
 	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
 
 	// Pi-Bolt: an extension `pi-bolt compile` built in, while its files are as they were then (core/extensions/compiled.ts).
-	const compiled = PIBOLT ? compiledExtensionFor(resolvedPath) : undefined;
+	const matched = PIBOLT ? compiledExtensionFor(resolvedPath) : undefined;
+	const compiled =
+		options?.compiledStatus === "detached" && matched && "extension" in matched
+			? { ...matched, extension: { ...matched.extension } }
+			: matched;
 	let failedCompiledIn: string | undefined;
 	if (compiled && "factory" in compiled) {
 		time(`${extensionPath} module import`, "extensions");
@@ -768,6 +773,7 @@ async function loadExtensionsInternal(
 	eventBus?: EventBus,
 	runtime?: ExtensionRuntime,
 	useCache = false,
+	options?: LoadExtensionsOptions,
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
@@ -786,6 +792,7 @@ async function loadExtensionsInternal(
 			resolvedEventBus,
 			resolvedRuntime,
 			cacheToken,
+			options,
 		);
 		if (warning) warnings.push({ path: extPath, warning });
 
@@ -807,13 +814,20 @@ async function loadExtensionsInternal(
 	};
 }
 
+/** Controls compiled-extension status bookkeeping for uncached loads. */
+export interface LoadExtensionsOptions {
+	/** Detached loads do not update process-global compiled status; extension code still runs normally. */
+	compiledStatus?: "active" | "detached";
+}
+
 export async function loadExtensions(
 	paths: string[],
 	cwd: string,
 	eventBus?: EventBus,
 	runtime?: ExtensionRuntime,
+	options?: LoadExtensionsOptions,
 ): Promise<LoadExtensionsResult> {
-	return loadExtensionsInternal(paths, cwd, eventBus, runtime);
+	return loadExtensionsInternal(paths, cwd, eventBus, runtime, false, options);
 }
 
 export async function loadExtensionsCached(
