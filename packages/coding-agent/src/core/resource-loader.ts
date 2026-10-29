@@ -239,7 +239,12 @@ interface OrdinaryResolutionBaseline {
 	readonly projectTrusted: boolean;
 	readonly options: CapturedLoaderOptions;
 	readonly extensionPaths: readonly { readonly path: string; readonly resolvedPath: string }[];
-	readonly inlineExtensions: readonly { readonly path: string; readonly descriptor: InlineExtension }[];
+	readonly inlineExtensions: readonly {
+		readonly id: string;
+		readonly ordinal: number;
+		readonly path: string;
+		readonly descriptor: InlineExtension;
+	}[];
 	readonly skills: readonly ResourceFileIdentity[];
 	readonly prompts: readonly ResourceFileIdentity[];
 	readonly themes: readonly ResourceFileIdentity[];
@@ -429,6 +434,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private additionalPromptTemplatePaths: string[];
 	private additionalThemePaths: string[];
 	private extensionFactories: InlineExtension[];
+	private inlineFactoryOrdinals: readonly number[];
 	private builtinExtensions: Map<string, BuiltinExtension>;
 	private noExtensions: boolean;
 	private disabledBuiltinExtensions: Set<string>;
@@ -485,7 +491,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.settingsManager = options.settingsManager ?? SettingsManager.create(this.cwd, this.agentDir);
 		this.eventBus = options.eventBus ?? createEventBus();
 		const factories = options.extensionFactories ?? [];
-		this.extensionFactories = factories.filter((input) => !isBuiltinExtension(input));
+		const inlineFactoryOrdinals: number[] = [];
+		this.extensionFactories = factories.filter((input, ordinal) => {
+			if (isBuiltinExtension(input)) return false;
+			inlineFactoryOrdinals.push(ordinal);
+			return true;
+		});
+		this.inlineFactoryOrdinals = Object.freeze(inlineFactoryOrdinals);
 		this.builtinExtensions = new Map(factories.filter(isBuiltinExtension).map((input) => [input.name, input]));
 		this.packageManager = new DefaultPackageManager({
 			cwd: this.cwd,
@@ -826,12 +838,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 			.filter((source) => existsSync(source))
 			.map((source) => resolvePath(source));
 		const inlineExtensions = Object.freeze(
-			capturedOptions.extensionFactories.map((descriptor, index) =>
-				Object.freeze({
+			capturedOptions.extensionFactories.map((descriptor, index) => {
+				const ordinal = this.inlineFactoryOrdinals[index];
+				return Object.freeze({
+					id: createHash("sha256").update("inline-extension\0").update(String(ordinal)).digest("hex"),
+					ordinal,
 					path: `<inline:${typeof descriptor === "function" ? index + 1 : descriptor.name}>`,
 					descriptor,
-				}),
-			),
+				});
+			}),
 		);
 		const inventory = this.createResourceInventory(
 			capturedExtensionPaths,
@@ -936,8 +951,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		options: CapturedLoaderOptions,
 	): ResourceInventory {
 		const entries = new Map<string, ResourceInventoryEntry>();
-		const add = (kind: ResourceInventoryEntry["kind"], path: string, enabled: boolean, sourceInfo: SourceInfo) => {
-			const id = createHash("sha256").update(kind).update("\0").update(path).digest("hex");
+		const add = (
+			kind: ResourceInventoryEntry["kind"],
+			path: string,
+			enabled: boolean,
+			sourceInfo: SourceInfo,
+			id = createHash("sha256").update(kind).update("\0").update(path).digest("hex"),
+		) => {
 			if (!entries.has(id)) {
 				entries.set(id, Object.freeze({ id, kind, path, enabled, sourceInfo: Object.freeze({ ...sourceInfo }) }));
 			}
@@ -947,8 +967,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 				this.findSourceInfoForPath(path, undefined, metadataByPath) ?? this.getDefaultSourceInfoForPath(path);
 			add("extension", resolvedPath, true, { ...sourceInfo, path: resolvedPath });
 		}
-		for (const { path } of inlineExtensions) {
-			add("extension", path, true, this.getDefaultSourceInfoForPath(path));
+		for (const { id, path } of inlineExtensions) {
+			add("extension", path, true, this.getDefaultSourceInfoForPath(path), id);
 		}
 		for (const [kind, files] of [
 			["skill", skills],

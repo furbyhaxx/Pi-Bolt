@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
+import type { ExtensionFactory } from "../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -157,6 +158,107 @@ describe("ordinary resource inventory", () => {
 		expect(next.entries.find((entry) => entry.path === laterPrompt)).toMatchObject({ enabled: true });
 		expect(next.entries.find((entry) => entry.path === skill)?.id).toBe(originalEntry?.id);
 		expect(initial.entries.some((entry) => entry.path === laterPrompt)).toBe(false);
+	});
+
+	it("keeps colliding inline labels separately addressable by their original descriptor ordinals", async () => {
+		const ordinaryExtension = join(root, "ordinary.ts");
+		const alias = join(root, "alias.ts");
+		const ordinaryPrompt = join(root, "ordinary.md");
+		writeFileSync(ordinaryExtension, "export default function() {};");
+		symlinkSync(ordinaryExtension, alias);
+		writeFileSync(ordinaryPrompt, "Prompt");
+		const calls: string[] = [];
+		const anonymous: ExtensionFactory = (pi) => {
+			calls.push("anonymous");
+			pi.registerCommand("shared", { description: "ordinary", handler: async () => {} });
+		};
+		const builtin: ExtensionFactory = () => void calls.push("builtin");
+		const namedOne: ExtensionFactory = (pi) => {
+			calls.push("named-one");
+			pi.registerCommand("shared", { description: "replaceable", handler: async () => {} });
+		};
+		const firstDuplicate: ExtensionFactory = () => void calls.push("first-duplicate");
+		const secondDuplicate: ExtensionFactory = () => void calls.push("second-duplicate");
+		const renamed = { name: "duplicate", factory: firstDuplicate };
+		const loader = new DefaultResourceLoader({
+			cwd,
+			agentDir,
+			additionalExtensionPaths: [ordinaryExtension, alias],
+			additionalPromptTemplatePaths: [ordinaryPrompt],
+			extensionFactories: [
+				anonymous,
+				{ name: "built", builtin: true, factory: builtin },
+				{ name: "1", replaceable: true, factory: namedOne },
+				renamed,
+				{ name: "duplicate", hidden: true, factory: secondDuplicate },
+			],
+		});
+		await loader.reload();
+		const inventory = loader.getResourceInventory();
+		const inline = inventory.entries.filter((entry) => entry.path.startsWith("<inline:"));
+		expect(inline.map((entry) => entry.path)).toEqual([
+			"<inline:1>",
+			"<inline:1>",
+			"<inline:duplicate>",
+			"<inline:duplicate>",
+		]);
+		expect(new Set(inline.map((entry) => entry.id)).size).toBe(4);
+		expect(Object.isFrozen(inventory.entries)).toBe(true);
+		expect(inline.every(Object.isFrozen)).toBe(true);
+		expect(calls).toEqual(["builtin", "anonymous", "named-one", "first-duplicate", "second-duplicate"]);
+		expect(loader.getExtensions().extensions.map((extension) => extension.path)).toEqual([
+			ordinaryExtension,
+			"builtin:built",
+			"<inline:1>",
+			"<inline:duplicate>",
+			"<inline:duplicate>",
+		]);
+		expect(
+			inventory.entries.filter((entry) => entry.kind === "extension" && entry.path === ordinaryExtension),
+		).toHaveLength(1);
+		expect(inventory.entries.some((entry) => entry.path === alias)).toBe(false);
+		const ordinaryId = inventory.entries.find((entry) => entry.path === ordinaryPrompt)?.id;
+		expect(ordinaryId).toBeDefined();
+		expect(loader.getResourceInventory()).toBe(inventory);
+		expect(loader.getResourceInventory().entries.find((entry) => entry.path === ordinaryPrompt)?.id).toBe(ordinaryId);
+
+		const baseline: unknown = Reflect.get(loader, "ordinaryBaseline");
+		if (typeof baseline !== "object" || baseline === null) throw new Error("Missing ordinary baseline");
+		const descriptors: unknown = Reflect.get(baseline, "inlineExtensions");
+		if (!Array.isArray(descriptors)) throw new Error("Missing inline descriptors");
+		expect(Object.isFrozen(descriptors)).toBe(true);
+		expect(descriptors.every(Object.isFrozen)).toBe(true);
+		expect(descriptors).toEqual([
+			expect.objectContaining({ id: inline[0].id, ordinal: 0, path: "<inline:1>", descriptor: anonymous }),
+			expect.objectContaining({
+				id: inline[1].id,
+				ordinal: 2,
+				path: "<inline:1>",
+				descriptor: expect.objectContaining({ name: "1", replaceable: true, factory: namedOne }),
+			}),
+			expect.objectContaining({
+				id: inline[2].id,
+				ordinal: 3,
+				path: "<inline:duplicate>",
+				descriptor: expect.objectContaining({ name: "duplicate", factory: firstDuplicate }),
+			}),
+			expect.objectContaining({
+				id: inline[3].id,
+				ordinal: 4,
+				path: "<inline:duplicate>",
+				descriptor: expect.objectContaining({ name: "duplicate", hidden: true, factory: secondDuplicate }),
+			}),
+		]);
+
+		renamed.name = "renamed";
+		await loader.reload();
+		const next = loader.getResourceInventory();
+		const nextInline = next.entries.filter((entry) => entry.path.startsWith("<inline:"));
+		expect(next.generation).not.toBe(inventory.generation);
+		expect(nextInline.map((entry) => entry.id)).toEqual(inline.map((entry) => entry.id));
+		expect(nextInline[2].path).toBe("<inline:renamed>");
+		expect(next.entries.find((entry) => entry.path === ordinaryPrompt)?.id).toBe(ordinaryId);
+		expect(inline[2].path).toBe("<inline:duplicate>");
 	});
 
 	it("retains collision candidates and disabled resources across kinds", async () => {
