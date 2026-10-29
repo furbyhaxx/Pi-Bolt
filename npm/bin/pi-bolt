@@ -5,6 +5,9 @@
 set -eu
 
 VERSION=1.0.7
+# BEGIN GENERATED FORK CONFIG
+TAG_PREFIX="bolt-v"
+# END GENERATED FORK CONFIG
 HOME_DIR="${PIBOLT_HOME:-$HOME/.pi-bolt}"
 
 if [ "$(uname -s)" = Darwin ]; then PLATFORM=darwin; else PLATFORM=linux; fi
@@ -25,7 +28,7 @@ if [ ! -x "$DIR/pi" ]; then
 	# (The first run installs nothing without a signature check: an opt-in to that, left in the environment, is not passed on.)
 	unset PIBOLT_UNVERIFIED
 	# On stderr, so that what Pi-Bolt prints on stdout (pi-bolt -p ... > file) is all that is there.
-	PIBOLT_LAUNCHER=1 PIBOLT_VERSION="bolt-v$VERSION" PIBOLT_VARIANT="$VARIANT" PIBOLT_INSTALL="$HOME_DIR/npm/$VERSION" \
+	PIBOLT_LAUNCHER=1 PIBOLT_VERSION="${TAG_PREFIX}${VERSION}" PIBOLT_VARIANT="$VARIANT" PIBOLT_INSTALL="$HOME_DIR/npm/$VERSION" \
 		sh "$here/../install.sh" 1>&2
 	printf '\n' >&2
 	# The versions installed before this one are not run again, except by sessions still running: those keep their folder (on

@@ -101,6 +101,7 @@ if (json) {
 			["install.sh", "#", [`RELEASE_KEY="${pem}"`, `RELEASE_SSH_KEY="${ssh}"`, `REPO="${repositoryUrl}"`, `API="${api}"`, `TAG_PREFIX="${config.tagPrefix}"`]],
 			["install.ps1", "#", [`$PiBoltReleaseKey = '${spki}'`, `$PiBoltRepo = '${repositoryUrl}'`, `$PiBoltApi = '${api}'`, `$PiBoltTagPrefix = '${config.tagPrefix}'`]],
 			["npm/install.cjs", "//", [`const RELEASE_KEY = "${spki}";`, `const REPO = "${repositoryUrl}";`, `const TAG_PREFIX = "${config.tagPrefix}";`]],
+			["npm/bin/pi-bolt", "#", [`TAG_PREFIX="${config.tagPrefix}"`]],
 		];
 		for (const [relative, comment, lines] of blocks) {
 			const file = join(root, relative);

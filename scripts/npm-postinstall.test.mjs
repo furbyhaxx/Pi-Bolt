@@ -197,7 +197,7 @@ test("the generated release keys agree in PEM, SPKI and OpenSSH form", () => {
 function forkFixture(t) {
 	const dir = mkdtempSync(join(tmpdir(), "pi-bolt-fork-test-"));
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
-	for (const file of ["scripts/generate-fork-config.mjs", "scripts/lib/sshsig.mjs", "install.sh", "install.ps1", "npm/install.cjs", "packages/coding-agent/src/pi-bolt-fork.generated.ts"]) {
+	for (const file of ["scripts/generate-fork-config.mjs", "scripts/lib/sshsig.mjs", "install.sh", "install.ps1", "npm/install.cjs", "npm/bin/pi-bolt", "packages/coding-agent/src/pi-bolt-fork.generated.ts"]) {
 		const target = join(dir, file);
 		mkdirSync(dirname(target), { recursive: true });
 		copyFileSync(join(root, file), target);
@@ -215,7 +215,7 @@ function generate(dir, ...args) {
 
 test("generator stamps and checks standalone identity while custom paths stay isolated", (t) => {
 	const { dir, config, publicKey } = forkFixture(t);
-	const files = ["install.sh", "install.ps1", "npm/install.cjs", "packages/coding-agent/src/pi-bolt-fork.generated.ts"];
+	const files = ["install.sh", "install.ps1", "npm/install.cjs", "npm/bin/pi-bolt", "packages/coding-agent/src/pi-bolt-fork.generated.ts"];
 	const before = files.map((file) => readFileSync(join(dir, file), "utf8"));
 	const custom = join(dir, "custom.ts");
 	let result = generate(dir, "--config", join(dir, "fork.json"), "--output", custom);
@@ -256,6 +256,13 @@ test("generator stamps and checks standalone identity while custom paths stay is
 		assert.ok(result.stderr.includes(file), result.stderr);
 		writeFileSync(target, original);
 	}
+	const launcher = join(dir, "npm/bin/pi-bolt");
+	writeFileSync(launcher, readFileSync(launcher, "utf8").replace(`TAG_PREFIX="${config.tagPrefix}"`, 'TAG_PREFIX="stale-"'));
+	result = generate(dir, "--check");
+	assert.equal(result.status, 1);
+	assert.ok(result.stderr.includes(launcher), result.stderr);
+	assert.equal(generate(dir).status, 0);
+	assert.equal(generate(dir, "--check").status, 0);
 	const target = join(dir, "install.sh");
 	writeFileSync(target, readFileSync(target, "utf8").replace("# END GENERATED FORK CONFIG", "# missing marker"));
 	result = generate(dir, "--check");
@@ -661,6 +668,33 @@ function fakeUname(dir, system) {
 	chmodSync(join(bin, "uname"), 0o755);
 	return bin;
 }
+
+test("the launcher's first run passes the configured tag prefix to the installer", { skip: (!findSh() || process.platform === "win32") && "no sh" }, (t) => {
+	const { dir, config } = forkFixture(t);
+	const generated = generate(dir);
+	assert.equal(generated.status, 0, generated.stderr);
+	for (const [launcher, prefix] of [
+		[join(npmDir, "bin", "pi-bolt"), fork.tagPrefix],
+		[join(dir, "npm", "bin", "pi-bolt"), config.tagPrefix],
+	]) {
+		const pkgDir = makePackage(t);
+		const home = join(pkgDir, "home");
+		const capture = join(pkgDir, "installer-env");
+		copyFileSync(launcher, join(pkgDir, "bin", "pi-bolt"));
+		writeFileSync(
+			join(pkgDir, "install.sh"),
+			'printf \'%s\\n\' "$PIBOLT_VERSION" "$PIBOLT_INSTALL" "$PIBOLT_VARIANT" "$PIBOLT_LAUNCHER" > "$TEST_CAPTURE"\n' +
+				'mkdir -p "$PIBOLT_INSTALL/pi-bolt-linux-x64" && printf \'#!/bin/sh\\necho "the build: $*"\\n\' > "$PIBOLT_INSTALL/pi-bolt-linux-x64/pi" && chmod 755 "$PIBOLT_INSTALL/pi-bolt-linux-x64/pi"\n',
+		);
+		const result = spawnSync("sh", [join(pkgDir, "bin", "pi-bolt"), "--version"], {
+			encoding: "utf8",
+			env: { ...process.env, PIBOLT_HOME: home, PIBOLT_VARIANT: "x64", TEST_CAPTURE: capture, PATH: `${fakeUname(pkgDir, "Linux")}:${process.env.PATH}` },
+		});
+		assert.equal(result.status, 0, result.stderr);
+		assert.equal(result.stdout, "the build: --version\n");
+		assert.deepEqual(readFileSync(capture, "utf8").trim().split("\n"), [`${prefix}${VERSION}`, join(home, "npm", VERSION), "x64", "1"]);
+	}
+});
 
 test("the placeholder, run without the install script: on Linux it starts the launcher; elsewhere it says what to run", { skip: !findSh() && "no sh" }, (t) => {
 	const pkgDir = makePackage(t);
