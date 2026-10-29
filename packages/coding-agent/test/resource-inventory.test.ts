@@ -7,6 +7,7 @@ import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { loadSkills } from "../src/core/skills.ts";
 import { createModelRegistry } from "./model-runtime-test-utils.ts";
 
 describe("ordinary resource inventory", () => {
@@ -212,6 +213,51 @@ describe("ordinary resource inventory", () => {
 		expect(sharedSkill?.id).toBeDefined();
 		expect(sharedPrompt?.id).toBeDefined();
 		expect(sharedSkill?.id).not.toBe(sharedPrompt?.id);
+	});
+
+	it("retains directory discovery order across colliding skill names and changed file contents", async () => {
+		const skillRoot = join(root, "ordered-skills");
+		for (const name of ["one", "two", "three"]) {
+			const dir = join(skillRoot, name);
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, "SKILL.md"), `---\nname: ${name}\ndescription: Skill\n---\nContent`);
+		}
+		const load = (skillPaths: string[]) => loadSkills({ cwd, agentDir, skillPaths, includeDefaults: false });
+		const [a, b, c] = load([skillRoot]).skills.map((skill) => skill.filePath);
+		const writeSkill = (path: string, name: string) =>
+			writeFileSync(path, `---\nname: ${name}\ndescription: Skill\n---\nContent`);
+		writeSkill(a, "x");
+		writeSkill(b, "x");
+		writeSkill(c, "y");
+
+		const settingsManager = SettingsManager.inMemory();
+		const settingsBefore = structuredClone(settingsManager.getGlobalSettings());
+		const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, additionalSkillPaths: [skillRoot] });
+		await loader.reload();
+		const inventory = loader.getResourceInventory();
+		const entries = inventory.entries.filter((entry) => entry.kind === "skill" && entry.enabled);
+		const frozenPaths = entries.map((entry) => entry.path);
+		expect(loader.getSkills().skills.map((skill) => skill.filePath)).toEqual([a, c]);
+		expect(loader.getSkills().diagnostics).toContainEqual(expect.objectContaining({ type: "collision", path: b }));
+		for (const entry of entries) {
+			expect(entry.sourceInfo).toMatchObject({ path: entry.path, source: "local", scope: "temporary" });
+			expect(Object.isFrozen(entry.sourceInfo)).toBe(true);
+		}
+
+		writeSkill(a, "z");
+		writeSkill(c, "x");
+		const ordinary = load([skillRoot]);
+		const replay = load(frozenPaths);
+		expect(ordinary.skills.map((skill) => [skill.name, skill.filePath])).toEqual([
+			["z", a],
+			["x", b],
+		]);
+		expect(replay.skills.map((skill) => [skill.name, skill.filePath])).toEqual(
+			ordinary.skills.map((skill) => [skill.name, skill.filePath]),
+		);
+		expect(frozenPaths).toEqual([a, b, c]);
+		expect(loader.getResourceInventory()).toBe(inventory);
+		expect(settingsManager.getGlobalSettings()).toEqual(settingsBefore);
 	});
 
 	it("does not publish an inventory when the first reload fails", async () => {

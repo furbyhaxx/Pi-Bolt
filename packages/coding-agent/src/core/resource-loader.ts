@@ -1142,6 +1142,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		metadataByPath?: Map<string, PathMetadata>,
 	): readonly ResourceFileIdentity[] {
 		let skillsResult: { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
+		const discoveredSkills: Array<{ path: string; sourceInfo: SourceInfo }> = [];
 		if (this.noSkills && skillPaths.length === 0) {
 			skillsResult = { skills: [], diagnostics: [] };
 		} else {
@@ -1150,15 +1151,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 				agentDir: this.agentDir,
 				skillPaths,
 				includeDefaults: false,
+				onSkillDiscovered: (path, sourceInfo) => discoveredSkills.push({ path, sourceInfo }),
 			});
 		}
 		const ordinarySkills = this.captureResourceFiles(
-			[
-				...skillsResult.skills.map((skill) => ({ path: skill.filePath, sourceInfo: skill.sourceInfo })),
-				...skillsResult.diagnostics.flatMap((diagnostic) =>
-					diagnostic.type === "collision" && diagnostic.path ? [{ path: diagnostic.path }] : [],
-				),
-			],
+			discoveredSkills,
 			this.extensionSkillSourceInfos,
 			metadataByPath,
 		);

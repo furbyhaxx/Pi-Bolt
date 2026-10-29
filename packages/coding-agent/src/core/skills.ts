@@ -405,6 +405,8 @@ export interface LoadSkillsOptions {
 	skillPaths: string[];
 	/** Include default skills directories. */
 	includeDefaults: boolean;
+	/** Observe discovered skill files in order, before name collisions are resolved. */
+	onSkillDiscovered?: (filePath: string, sourceInfo: Readonly<SourceInfo>) => void;
 }
 
 /**
@@ -434,6 +436,7 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 				continue;
 			}
 
+			options.onSkillDiscovered?.(skill.filePath, { ...skill.sourceInfo });
 			const existing = skillMap.get(skill.name);
 			if (existing) {
 				collisionDiagnostics.push({
