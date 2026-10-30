@@ -403,7 +403,7 @@ export function checkReleaseSums(
 	sums: Buffer,
 	signature: Buffer,
 	version: string,
-	key = PIBOLT_RELEASE_KEY,
+	key: string = PIBOLT_RELEASE_KEY,
 ): Map<string, string> {
 	let signed = false;
 	try {
@@ -479,7 +479,7 @@ export async function releaseArchives(
 	version: string,
 	platform: string,
 	cacheDir: string,
-	key = PIBOLT_RELEASE_KEY,
+	key: string = PIBOLT_RELEASE_KEY,
 ): Promise<{ runtime: string; kit: string }> {
 	const names = { runtime: `pi-bolt-runtime-${platform}.tar.gz`, kit: `pi-bolt-kit-${platform}.tar.gz` };
 	let sha = cachedReleaseSums(cacheDir, version, key);
