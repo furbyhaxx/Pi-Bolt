@@ -28,6 +28,7 @@ import type {
 	BeforeToolCallResult,
 	EarlyToolExecution,
 	FinishTurn,
+	PrepareContinuationMessages,
 	PrepareNextTurnContext,
 	PrepareRequest,
 	QueueMode,
@@ -127,6 +128,8 @@ export interface AgentOptions {
 	earlyToolExecution?: EarlyToolExecution;
 	finishTurn?: FinishTurn;
 	prepareRequest?: PrepareRequest;
+	/** Prepare messages once from the captured continuation context before its first request. */
+	prepareContinuationMessages?: PrepareContinuationMessages;
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -218,6 +221,8 @@ export class Agent {
 	public earlyToolExecution?: EarlyToolExecution;
 	public finishTurn?: FinishTurn;
 	public prepareRequest?: PrepareRequest;
+	/** Prepare messages once from the captured continuation context before its first request. */
+	public prepareContinuationMessages?: PrepareContinuationMessages;
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -255,6 +260,7 @@ export class Agent {
 		this.earlyToolExecution = runtimeOptions.earlyToolExecution;
 		this.finishTurn = runtimeOptions.finishTurn;
 		this.prepareRequest = runtimeOptions.prepareRequest;
+		this.prepareContinuationMessages = runtimeOptions.prepareContinuationMessages;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
 		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
@@ -461,12 +467,15 @@ export class Agent {
 
 	private async runContinuation(): Promise<void> {
 		await this.runWithLifecycle(async (signal) => {
+			const context = this.createContextSnapshot();
+			const prepareMessages = this.prepareContinuationMessages;
 			await runAgentLoopContinue(
-				this.createContextSnapshot(),
+				context,
 				this.createLoopConfig(),
 				(event) => this.processEvents(event),
 				signal,
 				this.streamFunction,
+				prepareMessages ? (snapshot) => prepareMessages(snapshot, signal) : undefined,
 			);
 		});
 	}

@@ -190,6 +190,12 @@ export type PrepareRequest = (
 
 export interface PrepareNextTurnContext extends AgentTurnContext {}
 
+/** Prepare messages once for a continuation after its context snapshot and startup events. */
+export type PrepareContinuationMessages = (
+	context: AgentContext,
+	signal: AbortSignal,
+) => AgentMessage[] | Promise<AgentMessage[]>;
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 

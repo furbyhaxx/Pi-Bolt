@@ -11,9 +11,12 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import {
 	Agent,
+	type AgentContext,
 	type AgentEvent,
+	type AgentMessage,
 	type AgentTool,
 	type AgentToolUpdateCallback,
+	runAgentLoopContinue,
 	type StreamFn,
 	setDefaultStreamFn,
 } from "../src/index.ts";
@@ -955,6 +958,177 @@ describe("Agent", () => {
 		agent.abort();
 		await firstPrompt.catch(() => {});
 	});
+
+	it("prepares continuation messages once against the captured tool loadout before requests", async () => {
+		const initialTool = createTool("initial");
+		const capturedTool = createTool("captured");
+		const laterTool = createTool("later");
+		const user = createUserMessage("existing");
+		const patch = { role: "system" as const, content: "", sections: { note: "new" }, timestamp: 1 };
+		const expectedPatch = {
+			...patch,
+			toolsAdded: [toToolDeclaration(capturedTool)],
+			toolsRemoved: [{ name: "initial" }],
+		};
+		const trace: string[] = [];
+		const events: AgentEvent[] = [];
+		const requests: AgentMessage[][] = [];
+		let prepared = 0;
+		let preparedContext: AgentContext | undefined;
+		let loopMessages: AgentMessage[] = [];
+		const agent = new Agent({
+			initialState: { systemPrompt: "base", tools: [initialTool], messages: [user] },
+			prepareContinuationMessages: async (context, signal) => {
+				trace.push("prepare");
+				prepared++;
+				preparedContext = context;
+				expect(signal).toBe(agent.signal);
+				expect(context.tools).toEqual([capturedTool]);
+				expect(context.messages).toEqual(agent.state.messages);
+				return [patch];
+			},
+			prepareRequest: ({ context }) => {
+				trace.push("request");
+				expect(context).toBe(preparedContext);
+				expect(context.tools).toEqual([capturedTool]);
+				expect(context.messages).toContainEqual(expectedPatch);
+			},
+			finishTurn: ({ newMessages }) => {
+				loopMessages = newMessages.slice();
+				return requests.length === 1 ? { action: "continue" } : { action: "end" };
+			},
+			streamFn: (_model, context) => {
+				trace.push("provider");
+				requests.push(context.messages.slice());
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() =>
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") }),
+				);
+				return stream;
+			},
+		});
+		agent.state.tools = [capturedTool];
+		agent.subscribe((event) => {
+			events.push(event);
+			if (event.type === "agent_start") {
+				trace.push("agent_start");
+				agent.state.tools = [laterTool];
+			} else if (event.type === "turn_start") {
+				trace.push("turn_start");
+			} else if (event.type === "message_start" && event.message.role === "system") {
+				trace.push("patch_start");
+			} else if (event.type === "message_end" && event.message.role === "system") {
+				trace.push("patch_end");
+				expect(agent.state.messages.at(-1)).toEqual(expectedPatch);
+			}
+		});
+
+		await agent.continue();
+
+		expect(prepared).toBe(1);
+		expect(trace.slice(0, 7)).toEqual([
+			"agent_start",
+			"turn_start",
+			"prepare",
+			"patch_start",
+			"patch_end",
+			"request",
+			"provider",
+		]);
+		expect(requests).toHaveLength(2);
+		for (const request of requests) {
+			expect(request.filter((message) => message.role === "system" && message.sections?.note === "new")).toEqual([
+				expectedPatch,
+			]);
+		}
+		expect(events.filter((event) => event.type === "message_start" && event.message.role === "system")).toHaveLength(
+			1,
+		);
+		expect(events.filter((event) => event.type === "message_end" && event.message.role === "system")).toHaveLength(1);
+		const end = events.find((event) => event.type === "agent_end");
+		if (end?.type !== "agent_end") throw new Error("Expected agent_end");
+		expect(end.messages).toEqual(loopMessages);
+		expect(end.messages.filter((message) => message.role === "system")).toEqual([expectedPatch]);
+		expect(agent.state.messages.slice(2)).toEqual(end.messages);
+	});
+
+	it("returns initial continuation messages from the low-level loop", async () => {
+		const user = createUserMessage("existing");
+		const patch = { role: "system" as const, content: "patch", timestamp: 1 };
+		const events: AgentEvent[] = [];
+		const messages = await runAgentLoopContinue(
+			{ messages: [user], tools: [] },
+			{
+				model: getModel("openai", "gpt-4o-mini"),
+				convertToLlm: (values) =>
+					values.filter(
+						(message) =>
+							message.role === "system" ||
+							message.role === "user" ||
+							message.role === "assistant" ||
+							message.role === "toolResult",
+					),
+			},
+			(event) => {
+				events.push(event);
+			},
+			undefined,
+			() => {
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() =>
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") }),
+				);
+				return stream;
+			},
+			() => [patch],
+		);
+
+		expect(messages.map((message) => message.role)).toEqual(["system", "assistant"]);
+		expect(messages[0]).toEqual(patch);
+		const end = events.find((event) => event.type === "agent_end");
+		if (end?.type !== "agent_end") throw new Error("Expected agent_end");
+		expect(end.messages).toEqual(messages);
+	});
+
+	it.each(["error", "aborted"] as const)(
+		"does not emit continuation patches when preparation is %s",
+		async (outcome) => {
+			const started = createDeferred();
+			const release = createDeferred();
+			const patch = { role: "system" as const, content: "uncommitted", timestamp: 1 };
+			const events: AgentEvent[] = [];
+			const agent = new Agent({
+				initialState: { messages: [createUserMessage("existing")] },
+				prepareContinuationMessages: async () => {
+					started.resolve();
+					await release.promise;
+					if (outcome === "error") throw new Error("preparation failed");
+					return [patch];
+				},
+				streamFn: unusedStreamFunction,
+			});
+			agent.subscribe((event) => {
+				events.push(event);
+			});
+			const run = agent.continue();
+			await started.promise;
+			if (outcome === "aborted") agent.abort();
+			release.resolve();
+			await run;
+
+			expect(
+				events.filter(
+					(event) =>
+						(event.type === "message_start" || event.type === "message_end") && event.message.role === "system",
+				),
+			).toEqual([]);
+			expect(agent.state.messages).not.toContainEqual(patch);
+			const failure = agent.state.messages.at(-1);
+			if (failure?.role !== "assistant") throw new Error("Expected assistant failure");
+			expect(failure.stopReason).toBe(outcome);
+			expect(agent.state.isStreaming).toBe(false);
+		},
+	);
 
 	it("continue() should process queued follow-up messages after an assistant turn", async () => {
 		const agent = new Agent({

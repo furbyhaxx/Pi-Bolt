@@ -136,12 +136,14 @@ export async function runAgentLoop(
 	return newMessages;
 }
 
+/** Continue a loop, optionally preparing initial messages after startup events and before the first request. */
 export async function runAgentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	emit: AgentEventSink,
 	signal: AbortSignal | undefined,
 	streamFn: StreamFn,
+	prepareInitialMessages?: (context: AgentContext) => AgentMessage[] | Promise<AgentMessage[]>,
 ): Promise<AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -157,7 +159,14 @@ export async function runAgentLoopContinue(
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
+	let initialMessages: AgentMessage[] = [];
+	if (prepareInitialMessages) {
+		signal?.throwIfAborted();
+		initialMessages = await prepareInitialMessages(currentContext);
+		signal?.throwIfAborted();
+	}
+
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn(), initialMessages);
 	return newMessages;
 }
 
@@ -178,6 +187,7 @@ async function runLoop(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
+	initialMessages: AgentMessage[] = [],
 ): Promise<void> {
 	let currentContext = initialContext;
 	let config = initialConfig;
@@ -192,7 +202,7 @@ async function runLoop(
 
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
-			let preparedMessages: AgentMessage[] = [];
+			let preparedMessages = lastCompletedTurn ? [] : initialMessages;
 			if (lastCompletedTurn) {
 				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
 				if (nextTurnSnapshot) {
