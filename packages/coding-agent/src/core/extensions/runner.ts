@@ -34,8 +34,10 @@ import {
 	type NormalizedBuildSystemPromptOptions,
 	normalizeBuildSystemPromptOptions,
 } from "../system-prompt.ts";
+import type { TranscriptProjectionProvider } from "../transcript-projection.ts";
 import type { VirtualModelDefinition } from "../virtual-models.ts";
 import { extensionDisplayName, extensionOfStack, isJitRequiredMessage, withJitHint } from "./jit-hint.ts";
+import type { TranscriptProjectionRegistration } from "./transcript-projection-registry.ts";
 import type {
 	AgentBeforeSettleEvent,
 	BeforeAgentStartCustomEvent,
@@ -442,6 +444,7 @@ export class ExtensionRunner {
 	private shutdownHandler: ShutdownHandler = () => {};
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
+	private readonly transcriptProjectionListeners = new Set<() => void>();
 	private staleMessage: string | undefined;
 	/** The mobile UI kit's views of this session (docs/mobile-ui.md), made when a mode binds its UI. */
 	private views: ViewHost | undefined;
@@ -522,6 +525,19 @@ export class ExtensionRunner {
 			void this.emit({ type: "mcp_servers_change", servers: this.runtime.mcpServers.list() });
 			this.reportUnhandledMcpServers();
 		});
+
+		// Providers registered during loading are applied here, in load order, so the first extension keeps
+		// the session's slot; the others get an error through the channel error listeners read.
+		this.runtime.transcriptProjections.setChangeListener(() => {
+			for (const listener of this.transcriptProjectionListeners) listener();
+		});
+		for (const registration of this.runtime.pendingTranscriptProjectionRegistrations) {
+			this.applyTranscriptProjectionRegistration(registration);
+		}
+		this.runtime.pendingTranscriptProjectionRegistrations = [];
+		this.runtime.registerTranscriptProjection = (provider, extensionPath = "<unknown>") => {
+			this.applyTranscriptProjectionRegistration({ provider, extensionPath });
+		};
 
 		// Flush provider registrations queued during extension loading
 		for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
@@ -1090,6 +1106,27 @@ export class ExtensionRunner {
 			}
 		}
 		return undefined;
+	}
+
+	/** The provider the interactive transcript renders through, if an extension registered one. */
+	getTranscriptProjectionProvider(): TranscriptProjectionProvider | undefined {
+		return this.runtime.transcriptProjections.get();
+	}
+
+	/** Call `listener` when the session's transcript projection provider changes or goes away. */
+	onTranscriptProjectionChange(listener: () => void): () => void {
+		this.transcriptProjectionListeners.add(listener);
+		return () => this.transcriptProjectionListeners.delete(listener);
+	}
+
+	private applyTranscriptProjectionRegistration(registration: TranscriptProjectionRegistration): void {
+		const rejection = this.runtime.transcriptProjections.register(registration);
+		if (rejection === undefined) return;
+		this.emitError({
+			extensionPath: registration.extensionPath,
+			event: "transcript_projection",
+			error: rejection,
+		});
 	}
 
 	private resolveRegisteredCommands(): ResolvedCommand[] {

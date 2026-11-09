@@ -27,11 +27,13 @@ import {
 import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
+import type { TranscriptProjectionProvider } from "../transcript-projection.ts";
 import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
 import { compiledExtensionFor, firstLineOf } from "./compiled.ts";
 import { PI_MODULE_NAMES, provideModulesToFiles } from "./compiled-modules.ts";
 import { extensionDisplayName, withJitHint } from "./jit-hint.ts";
 import { loadJitiBunLoader } from "./jiti-bun-loader.lazy.ts";
+import { TranscriptProjectionRegistry } from "./transcript-projection-registry.ts";
 import type {
 	EntryRenderer,
 	Extension,
@@ -234,6 +236,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		pendingProviderRegistrations: [],
 		pendingNativeProviderRegistrations: [],
 		mcpServers: new McpServerRegistry(),
+		transcriptProjections: new TranscriptProjectionRegistry(),
+		pendingTranscriptProjectionRegistrations: [],
 		pendingVirtualModelRegistrations: [],
 		createContext: notInitialized,
 		assertActive,
@@ -244,6 +248,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
 				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
 			for (const unsubscribe of eventBusUnsubscribers) unsubscribe();
 			eventBusUnsubscribers.clear();
+			// Extensions are gone: a stale session must not render through their provider.
+			runtime.transcriptProjections.clear();
 		},
 		trackEventBusSubscription: (unsubscribe) => {
 			let active = true;
@@ -277,6 +283,10 @@ export function createExtensionRuntime(): ExtensionRuntime {
 			runtime.pendingVirtualModelRegistrations = runtime.pendingVirtualModelRegistrations.filter(
 				({ definition }) => definition.provider !== provider || definition.id !== id,
 			);
+		},
+		// Pre-bind: queue the registration so bindCore() applies it or rejects it through its error channel.
+		registerTranscriptProjection: (provider, extensionPath = "<unknown>") => {
+			runtime.pendingTranscriptProjectionRegistrations.push({ provider, extensionPath });
 		},
 	};
 
@@ -425,6 +435,21 @@ function createExtensionAPI(
 			assertActive();
 			extension.toolRenderers ??= [];
 			extension.toolRenderers.push(resolver);
+		},
+
+		registerTranscriptProjection(provider: TranscriptProjectionProvider): void {
+			assertActive();
+			if (typeof provider?.id !== "string" || provider.id.trim().length === 0) {
+				throw new Error(
+					`Transcript projection provider registered by extension "${extension.path}" must have a non-empty string id. Use pi.registerTranscriptProjection({ id, project, onAction }).`,
+				);
+			}
+			if (typeof provider.project !== "function" || typeof provider.onAction !== "function") {
+				throw new Error(
+					`Transcript projection provider "${provider.id}" registered by extension "${extension.path}" must define project() and onAction().`,
+				);
+			}
+			applyRuntimeChange(() => runtime.registerTranscriptProjection(provider, extension.path));
 		},
 
 		// Flag access - checks extension registered it, reads from runtime

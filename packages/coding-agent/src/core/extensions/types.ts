@@ -111,7 +111,12 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../tools/index.ts";
+import type { TranscriptProjectionProvider } from "../transcript-projection.ts";
 import type { ModelRoute, ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
+import type {
+	TranscriptProjectionRegistration,
+	TranscriptProjectionRegistry,
+} from "./transcript-projection-registry.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
@@ -1795,6 +1800,14 @@ export interface ExtensionAPI {
 	/** Choose how tool calls are drawn. Resolvers run in extension load order. */
 	registerToolRenderer(resolver: ToolRendererResolver): void;
 
+	/**
+	 * Register the session's transcript projection provider: the interactive transcript then draws spans of the active
+	 * branch as your rows instead of the raw entries. One session renders one provider; a later registration from
+	 * another extension is rejected and reported as an extension error. See the `pi.registerTranscriptProjection()`
+	 * section of docs/extensions.md.
+	 */
+	registerTranscriptProjection(provider: TranscriptProjectionProvider): void;
+
 	// =========================================================================
 	// Actions
 	// =========================================================================
@@ -2248,8 +2261,19 @@ export interface ExtensionRuntimeState {
 	registerProvider: (name: string, config: ProviderConfig, extensionPath?: string) => void;
 	registerNativeProvider: (provider: Provider, extensionPath?: string) => void;
 	unregisterProvider: (name: string, extensionPath?: string) => void;
+	/**
+	 * Register the session's transcript projection provider.
+	 *
+	 * Before a runner binds: queues the registration, which the runner then applies or rejects.
+	 * After a runner binds: applies it, reporting a rejection through the runner's error channel.
+	 */
+	registerTranscriptProjection: (provider: TranscriptProjectionProvider, extensionPath?: string) => void;
 	/** Servers registered with `pi.registerMcpServer()`. */
 	mcpServers: McpServerRegistry;
+	/** The session's transcript projection provider, registered with `pi.registerTranscriptProjection()`. */
+	transcriptProjections: TranscriptProjectionRegistry;
+	/** Transcript projection registrations queued during extension loading, applied when a runner binds. */
+	pendingTranscriptProjectionRegistrations: TranscriptProjectionRegistration[];
 	registerVirtualModel: (definition: VirtualModelDefinition, extensionPath?: string) => void;
 	unregisterVirtualModel: (provider: string, id: string) => void;
 }

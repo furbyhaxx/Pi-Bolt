@@ -16,6 +16,7 @@ An extension runs inside the Pi process with the same operating-system permissio
 - **Custom commands** - Register commands like `/mycommand` via `pi.registerCommand()`
 - **Session persistence** - Store state that survives restarts via `pi.appendEntry()`
 - **Custom rendering** - Control how tool calls/results and messages appear in TUI
+- **Transcript projection** - Replace spans of the interactive transcript with host-drawn rows via `pi.registerTranscriptProjection()`
 - **Providers and MCP servers** - Register model providers, virtual models, and MCP servers
 
 **Example use cases:**
@@ -1855,6 +1856,60 @@ pi.registerEntryRenderer("status-card", (entry, { expanded }, theme) => {
 
 pi.appendEntry("status-card", { title: "Indexed files", count: 17 });
 ```
+
+### pi.registerTranscriptProjection(provider)
+
+Draw the active branch of the interactive transcript from your own rows instead of Pi's rendering of the raw entries. Pi keeps layout, scrolling, focus, streaming and expansion; the provider only says how the branch is presented, so rows are plain data, never ANSI or components.
+
+```typescript
+pi.registerTranscriptProjection({
+  id: "my-grouping",
+  project(snapshot) {
+    // Return undefined to keep the ordinary transcript.
+    return { revision: snapshot.revision, items: snapshot.entries.map((entry) => ({ kind: "entry", entryId: entry.id })) };
+  },
+  onAction(spanId, actionId) {
+    // Called for the actions Pi draws on a span, apart from its built-in reveal and collapse.
+  },
+});
+```
+
+**One provider per session.** The first extension to register keeps the slot. A later registration from another extension is rejected, reported as an extension error, and the first provider stays; the owning extension may register again to replace its own provider. Register during load or later, for example in `session_start`. The provider goes away when its extension reloads or the session is replaced.
+
+**Feature detection.** Older hosts have no such method. Check before calling it and keep today's behavior otherwise:
+
+```typescript
+if (typeof pi.registerTranscriptProjection !== "function") return;
+```
+
+**Snapshot.** `project()` receives `{ revision, leafId, entries }`. Each entry is `{ id, parentId, kind, role?, timestamp }`: the active branch in order, without message bodies. Read bodies through the session APIs when you need them.
+
+**Projection.** Return `{ revision, items }` or `undefined`. An item is either `{ kind: "entry", entryId }`, which Pi renders as usual, or a span:
+
+```typescript
+{
+  kind: "span",
+  spanId: "build-fix-1",
+  entryIds: ["a1", "b2"], // Branch entries, contiguous and in branch order
+  rows: [
+    { segments: [{ text: "Fixed ", tone: "text" }, { text: "build", tone: "success" }] },
+    { indent: 1, segments: [{ text: "3 files", tone: "dim" }] },
+  ],
+  actions: [{ id: "retry", label: "Retry", key: "r" }],
+  state: "warning",
+  label: "Build fix",
+}
+```
+
+- Rows: at most 12 per span and 8 segments per row, with `indent` from 0 to 8.
+- Text: a segment text, a span `label` and an action `label` hold at most 240 characters; control characters are stripped.
+- Actions: at most 6 per span. Pi adds its own reveal-originals and collapse actions.
+- Tones: `text`, `muted`, `dim`, `accent`, `success`, `warning`, `error`, for a segment `tone` and a span `state`. The host resolves them through its theme; a segment may also set `bold`.
+- The bounds and tones are exported as `TRANSCRIPT_PROJECTION_LIMITS` and `TRANSCRIPT_TONES`.
+
+**Validation and fallback.** Pi validates the projection against the snapshot: every branch entry appears at most once, as an `entry` item or inside exactly one span, and spans cover contiguous entries in branch order. On any violation Pi renders the ordinary transcript for the whole view and reports `fallbackReason(provider.id, rejection)` as an extension error naming the rejected rule. A provider that throws or times out falls back the same way.
+
+**Revisions.** Entries newer than the coverage you returned render raw, so the streaming tail arrives as it does today. Results for a replaced revision are discarded: a result answering a snapshot that is no longer current is dropped.
 
 ### pi.registerShortcut(shortcut, options)
 

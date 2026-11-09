@@ -4,6 +4,31 @@
 
 export type { SlashCommandInfo, SlashCommandSource } from "../slash-commands.ts";
 export type { SourceInfo } from "../source-info.ts";
+// Transcript projection (docs/extensions.md#piregistertranscriptprojectionprovider)
+export type {
+	Action,
+	EntryItem,
+	ProjectionRejectionReason,
+	RejectedTranscriptProjection,
+	ResolvedItem,
+	Row,
+	Segment,
+	SpanItem,
+	Tone,
+	TranscriptItem,
+	TranscriptProjection,
+	TranscriptProjectionProvider,
+	TranscriptProjectionValidation,
+	TranscriptSnapshot,
+	TranscriptSnapshotEntry,
+	ValidTranscriptProjection,
+} from "../transcript-projection.ts";
+export {
+	fallbackReason,
+	TRANSCRIPT_PROJECTION_LIMITS,
+	TRANSCRIPT_TONES,
+	validateTranscriptProjection,
+} from "../transcript-projection.ts";
 export {
 	createExtensionRuntime,
 	discoverAndLoadExtensions,
@@ -19,6 +44,8 @@ export type {
 	SwitchSessionHandler,
 } from "./runner.ts";
 export { ExtensionRunner } from "./runner.ts";
+export type { TranscriptProjectionRegistration } from "./transcript-projection-registry.ts";
+export { TranscriptProjectionRegistry } from "./transcript-projection-registry.ts";
 export type {
 	AfterProviderResponseEvent,
 	AgentActivityOutcome,
