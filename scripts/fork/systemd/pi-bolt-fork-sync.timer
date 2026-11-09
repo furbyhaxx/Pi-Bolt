@@ -1,0 +1,13 @@
+# Rendered by scripts/fork/install-timer.sh: @CHECKOUT@ is the fork checkout's path.
+[Unit]
+Description=Pi-Bolt fork: daily merge of upstream/pi-bolt and rebuild
+
+[Timer]
+OnCalendar=daily
+# A machine that was off at the scheduled time runs the timer when it starts.
+Persistent=true
+RandomizedDelaySec=1h
+Unit=pi-bolt-fork-sync.service
+
+[Install]
+WantedBy=timers.target

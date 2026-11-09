@@ -1,0 +1,11 @@
+# Rendered by scripts/fork/install-timer.sh: @CHECKOUT@ is the fork checkout's path.
+[Unit]
+Description=Pi-Bolt fork: merge upstream/pi-bolt into fork/carry and rebuild the local build
+Documentation=file:@CHECKOUT@/scripts/fork/README.md
+
+[Service]
+Type=oneshot
+# Two steps: a merge with a failing smoke gate stops the unit (exit 3), and nothing is built from it. Neither step
+# installs: an install replaces the Pi-Bolt that is running.
+ExecStart=@CHECKOUT@/scripts/fork/sync.sh
+ExecStart=@CHECKOUT@/scripts/fork/rebuild.sh
