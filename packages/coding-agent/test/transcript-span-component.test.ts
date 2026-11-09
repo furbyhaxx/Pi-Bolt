@@ -287,9 +287,11 @@ describe("TranscriptSpanComponent", () => {
 
 	test("only the visible part of a truncated label runs the action", () => {
 		const onAction = vi.fn<(actionId: string) => void>();
+		const onToggleRevealed = vi.fn<(revealed: boolean) => void>();
 		const component = new TranscriptSpanComponent(spanItem(TWO_ACTIONS), {
 			renderOriginals: () => [],
 			onAction,
+			onToggleRevealed,
 		});
 
 		const hint = hintLine(component, 36);
@@ -302,11 +304,38 @@ describe("TranscriptSpanComponent", () => {
 		click(component, ellipsis, hint.y, 36);
 		click(component, 35, hint.y, 36);
 		expect(onAction).not.toHaveBeenCalled();
+		expect(onToggleRevealed).not.toHaveBeenCalled();
 
-		// The clicks above toggled that span, so the visible part is tried on a fresh one.
-		const other = new TranscriptSpanComponent(spanItem(TWO_ACTIONS), { renderOriginals: () => [], onAction });
-		const otherHint = hintLine(other, 36);
-		click(other, otherHint.text.indexOf("Inspe"), otherHint.y, 36);
+		click(component, hint.text.indexOf("Inspe"), hint.y, 36);
 		expect(onAction.mock.calls).toEqual([["inspect"]]);
+		expect(onToggleRevealed).not.toHaveBeenCalled();
+	});
+
+	test("leaves a click on a clipped label's ellipsis alone", () => {
+		const onAction = vi.fn<(actionId: string) => void>();
+		const onToggleRevealed = vi.fn<(revealed: boolean) => void>();
+		const width = 57;
+		const component = new TranscriptSpanComponent(spanItem(TWO_ACTIONS), {
+			renderOriginals: () => [],
+			onAction,
+			onToggleRevealed,
+		});
+
+		const hint = hintLine(component, width);
+		expect(hint.text).toContain("Inspect record");
+		expect(hint.text).not.toContain("Open in context");
+		expect(hint.text.endsWith("...")).toBe(true);
+
+		// The ellipsis and the columns right of it stand for the clipped part of "Open in context".
+		click(component, hint.text.indexOf("..."), hint.y, width);
+		click(component, width - 1, hint.y, width);
+		expect(onAction).not.toHaveBeenCalled();
+		expect(onToggleRevealed).not.toHaveBeenCalled();
+		expect(text(component, width)).toContain("reveal originals");
+
+		// The last column of the fully shown label in front of it still runs that action.
+		click(component, hint.text.indexOf("Inspect record") + "Inspect record".length - 1, hint.y, width);
+		expect(onAction.mock.calls).toEqual([["inspect"]]);
+		expect(onToggleRevealed).not.toHaveBeenCalled();
 	});
 });

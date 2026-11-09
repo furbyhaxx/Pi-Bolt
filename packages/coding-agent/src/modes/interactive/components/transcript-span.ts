@@ -146,6 +146,9 @@ interface HintLabel {
 	readonly actionId?: string;
 }
 
+/** What a click on the hint line covers. */
+type HintHit = { kind: "action"; actionId: string } | { kind: "clipped" };
+
 /** Separates the hint line's labels. */
 const HINT_SEPARATOR = " · ";
 /** The ellipsis TruncatedText appends to a line that is too wide for it. */
@@ -153,7 +156,8 @@ const TRUNCATION_ELLIPSIS = "...";
 
 /**
  * The hint line, with every provider action label a click target of its own. A click on the host's own
- * hint or on the separators reaches the span's reveal toggle, which wraps this line.
+ * hint or on the separators reaches the span's reveal toggle, which wraps this line; a click on the
+ * columns of a label the line had no room for reaches nothing.
  */
 class SpanHintLine implements Component {
 	private readonly labels: readonly HintLabel[];
@@ -174,9 +178,9 @@ class SpanHintLine implements Component {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (event.type !== "click" || event.button !== "left" || event.y !== 0) return undefined;
-		const actionId = this.actionAt(event.x, event.width);
-		if (actionId === undefined) return undefined;
-		this.onAction?.(actionId);
+		const hit = this.hitAt(event.x, event.width);
+		if (hit === undefined) return undefined;
+		if (hit.kind === "action") this.onAction?.(hit.actionId);
 		return { handled: true };
 	}
 
@@ -184,24 +188,31 @@ class SpanHintLine implements Component {
 		return this.labels.map((label) => label.text).join(theme.fg("dim", HINT_SEPARATOR));
 	}
 
-	/** The action whose label covers column `x`; text the line had no room for is not clickable. */
-	private actionAt(x: number, width: number): string | undefined {
+	/**
+	 * What column `x` covers: a label's action, or the ellipsis and the columns it stands for, which belong to a
+	 * clipped action label and so neither run anything nor reach the reveal toggle.
+	 */
+	private hitAt(x: number, width: number): HintHit | undefined {
 		const available = Math.max(1, width - this.paddingX * 2);
 		const line = this.line();
 		const shown = truncateToWidth(line, available);
 		const truncated = visibleWidth(shown) < visibleWidth(line);
-		// TruncatedText's last columns of a cut line are the ellipsis, which belongs to no label.
-		const end = this.paddingX + visibleWidth(shown) - (truncated ? visibleWidth(TRUNCATION_ELLIPSIS) : 0);
-		if (x < this.paddingX || x >= end) return undefined;
+		// TruncatedText's last columns of a cut line are the ellipsis, which stands for the labels' hidden text.
+		const contentEnd = this.paddingX + visibleWidth(shown) - (truncated ? visibleWidth(TRUNCATION_ELLIPSIS) : 0);
+		if (x < this.paddingX) return undefined;
 
 		let column = this.paddingX;
+		let clipped = false;
 		for (const [index, label] of this.labels.entries()) {
 			if (index > 0) column += visibleWidth(HINT_SEPARATOR);
 			const labelEnd = column + visibleWidth(label.text);
-			if (label.actionId !== undefined && x >= column && x < labelEnd) return label.actionId;
+			if (label.actionId !== undefined) {
+				if (x >= column && x < Math.min(labelEnd, contentEnd)) return { kind: "action", actionId: label.actionId };
+				if (labelEnd > contentEnd) clipped = true;
+			}
 			column = labelEnd;
 		}
-		return undefined;
+		return clipped && x >= contentEnd ? { kind: "clipped" } : undefined;
 	}
 }
 
