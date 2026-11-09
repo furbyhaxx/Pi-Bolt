@@ -114,6 +114,7 @@ For isolation setup and limitations, see [Run Pi in an isolated environment](../
 |-----------|-------------|
 | `message-renderer.ts` | Custom message rendering with colors and expandable details via `registerMessageRenderer` |
 | `entry-renderer.ts` | TUI-only session entry rendering via `appendEntry` and `registerEntryRenderer` |
+| `transcript-projection.ts` | Folds finished turns into spans via `registerTranscriptProjection`; `/turn-fold` switches back to the ordinary transcript |
 | `debug-provider.ts` | Toggle raw provider stream capture with `/debug-provider` and inspect each assistant message in a TUI-only session entry |
 | `event-bus.ts` | Inter-extension communication via `pi.events` |
 
