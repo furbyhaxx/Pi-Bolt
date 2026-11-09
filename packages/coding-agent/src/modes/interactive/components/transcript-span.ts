@@ -1,4 +1,11 @@
-import { type Component, Container, MouseRegion, TruncatedText } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	MouseRegion,
+	TruncatedText,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import {
 	type Action,
 	type Row,
@@ -85,7 +92,7 @@ export class TranscriptSpanComponent extends Container {
 
 		const rows = this.revealed ? this.item.rows : this.item.rows.slice(0, this.collapsedRowsLimit);
 		for (const row of rows) {
-			content.addChild(new TruncatedText(rowLine(row), this.outputPad, 0));
+			content.addChild(new RowText(row, this.outputPad));
 		}
 		const folded = this.item.rows.length - rows.length;
 		if (folded > 0) {
@@ -126,12 +133,46 @@ export class TranscriptSpanComponent extends Container {
 	}
 }
 
-function rowLine(row: Row): string {
-	let line = " ".repeat(2 + (row.indent ?? 0) * 2);
-	for (const segment of row.segments) {
-		line += theme.fg(segment.tone, segment.bold ? theme.bold(segment.text) : segment.text);
+/** A narrowed segment keeps no less than this many columns, enough for its ellipsis. */
+const MIN_SHRUNK_SEGMENT_WIDTH = 3;
+
+/** One projected row; the row is only sized once its width is known, so a narrow row can shrink a segment first. */
+class RowText implements Component {
+	private readonly row: Row;
+	private readonly paddingX: number;
+
+	constructor(row: Row, paddingX: number) {
+		this.row = row;
+		this.paddingX = paddingX;
 	}
-	return line;
+
+	/** No cached state: the line is rebuilt for the width it is asked to render at. */
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		// Same horizontal padding TruncatedText applies, which owns the right truncation that follows the shrink.
+		const availableWidth = Math.max(1, width - this.paddingX * 2);
+		return new TruncatedText(rowLine(this.row, availableWidth), this.paddingX, 0).render(width);
+	}
+}
+
+function rowLine(row: Row, availableWidth: number): string {
+	const prefix = " ".repeat(2 + (row.indent ?? 0) * 2);
+	const parts = row.segments.map((segment) => {
+		const text = theme.fg(segment.tone, segment.bold ? theme.bold(segment.text) : segment.text);
+		return { text, width: visibleWidth(text), shrinkable: segment.shrink === true };
+	});
+
+	let overflow = visibleWidth(prefix) + parts.reduce((sum, part) => sum + part.width, 0) - availableWidth;
+	for (const part of parts) {
+		if (overflow <= 0) break;
+		if (!part.shrinkable || part.width <= MIN_SHRUNK_SEGMENT_WIDTH) continue;
+		const narrowed = Math.max(MIN_SHRUNK_SEGMENT_WIDTH, part.width - overflow);
+		overflow -= part.width - narrowed;
+		part.width = narrowed;
+	}
+
+	return prefix + parts.map((part) => truncateToWidth(part.text, part.width)).join("");
 }
 
 function actionHint(action: Action): string {

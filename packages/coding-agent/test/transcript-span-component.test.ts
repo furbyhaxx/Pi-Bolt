@@ -130,6 +130,60 @@ describe("TranscriptSpanComponent", () => {
 		expect(component.render(36).length).toBe(3);
 	});
 
+	test("keeps the full handle by narrowing the shrinkable segment first", () => {
+		const title = ` ${`a long task title `.repeat(4)}`;
+		const component = new TranscriptSpanComponent(
+			spanItem({
+				rows: [
+					{
+						segments: [
+							{ text: "done", tone: "success" },
+							{ text: " ≡", tone: "dim" },
+							{ text: title, tone: "text", bold: true, shrink: true },
+							{ text: " t:final-survey/1", tone: "muted" },
+						],
+					},
+				],
+			}),
+			{ renderOriginals: () => [] },
+		);
+
+		expectLinesFit(component, 36);
+		const row = stripAnsi(component.render(36)[1]!).trimEnd();
+		expect(row).toContain("done");
+		expect(row).toContain("...");
+		expect(row.endsWith("t:final-survey/1")).toBe(true);
+
+		const roomy = stripAnsi(component.render(140)[1]!).trimEnd();
+		expect(roomy).toContain(title.trimEnd());
+		expect(roomy).not.toContain("...");
+		expect(roomy.endsWith("t:final-survey/1")).toBe(true);
+	});
+
+	test("truncates from the right when no segment is shrinkable", () => {
+		const component = new TranscriptSpanComponent(
+			spanItem({
+				rows: [
+					{
+						segments: [
+							{ text: "done", tone: "success" },
+							{ text: " ≡", tone: "dim" },
+							{ text: ` ${`a long task title `.repeat(4)}`, tone: "text", bold: true },
+							{ text: " t:final-survey/1", tone: "muted" },
+						],
+					},
+				],
+			}),
+			{ renderOriginals: () => [] },
+		);
+
+		expectLinesFit(component, 36);
+		const row = stripAnsi(component.render(36)[1]!).trimEnd();
+		expect(row).toContain("done");
+		expect(row.endsWith("...")).toBe(true);
+		expect(row).not.toContain("t:final-survey/1");
+	});
+
 	test("folds rows past the collapsed limit until revealed", () => {
 		const rows = [1, 2, 3, 4].map((index) => ({ segments: [{ text: `row ${index}`, tone: "text" as const }] }));
 		const component = new TranscriptSpanComponent(spanItem({ rows }), {

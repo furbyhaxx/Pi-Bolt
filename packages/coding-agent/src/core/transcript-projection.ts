@@ -27,8 +27,20 @@ export const TRANSCRIPT_PROJECTION_LIMITS = {
 const { maxRowsPerSpan, maxSegmentsPerRow, maxTextLength, maxActionsPerSpan, maxRowIndent } =
 	TRANSCRIPT_PROJECTION_LIMITS;
 
-/** One stretch of text inside a row; `text` is stripped of control characters during validation. */
-export type Segment = { readonly text: string; readonly tone: Tone; readonly bold?: boolean };
+/**
+ * One stretch of text inside a row; `text` is stripped of control characters during validation.
+ *
+ * `shrink` marks the segment a host narrows first: a row wider than the terminal takes width away from the
+ * shrinkable segments before anything else, down to 3 visible columns, ellipsis included, while the other segments
+ * keep their text. If the row still does not fit, the host truncates it from the right. A host that ignores the field
+ * truncates from the right, which is allowed.
+ */
+export type Segment = {
+	readonly text: string;
+	readonly tone: Tone;
+	readonly bold?: boolean;
+	readonly shrink?: boolean;
+};
 
 /** One line of a span; `indent` is the extra left indentation levels, 0 to `TRANSCRIPT_PROJECTION_LIMITS.maxRowIndent`. */
 export type Row = { readonly segments: readonly Segment[]; readonly indent?: number };
@@ -350,7 +362,11 @@ function readRow(raw: unknown, spanId: string): Parsed<Row> {
 		if (bold !== undefined && typeof bold !== "boolean") {
 			return { rejection: reject("invalid-item", `a segment of span ${quoted(spanId)} has a non-boolean bold`) };
 		}
-		segments.push({ text, tone, bold });
+		const shrink = rawSegment.shrink;
+		if (shrink !== undefined && typeof shrink !== "boolean") {
+			return { rejection: reject("invalid-item", `a segment of span ${quoted(spanId)} has a non-boolean shrink`) };
+		}
+		segments.push({ text, tone, bold, shrink });
 	}
 	const indent = raw.indent;
 	if (

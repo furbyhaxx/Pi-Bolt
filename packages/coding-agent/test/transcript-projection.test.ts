@@ -95,6 +95,14 @@ describe("validateTranscriptProjection acceptance", () => {
 			expect(items[0]).toMatchObject({ kind: "span", state: tone });
 		}
 	});
+	it("accepts a shrinkable segment and keeps the flag", () => {
+		const items = accepted([
+			spanItem("s1", branch, {
+				rows: [{ segments: [{ text: "title", tone: "text", shrink: true }] }],
+			}),
+		]);
+		expect(items[0]).toMatchObject({ rows: [{ segments: [{ text: "title", tone: "text", shrink: true }] }] });
+	});
 });
 
 describe("validateTranscriptProjection rejection", () => {
@@ -163,6 +171,15 @@ describe("validateTranscriptProjection rejection", () => {
 			name: "an unknown segment tone",
 			items: [spanItem("s1", ["e1"], { rows: [{ segments: [{ text: "x", tone: "purple" as Tone }] }] })],
 			reason: "unknown-tone",
+		},
+		{
+			name: "a non-boolean shrink",
+			items: [
+				spanItem("s1", ["e1"], {
+					rows: [{ segments: [{ text: "x", tone: "text", shrink: "yes" as unknown as boolean }] }],
+				}),
+			],
+			reason: "invalid-item",
 		},
 		{
 			name: "too many rows",
