@@ -45,7 +45,10 @@ export type Segment = {
 /** One line of a span; `indent` is the extra left indentation levels, 0 to `TRANSCRIPT_PROJECTION_LIMITS.maxRowIndent`. */
 export type Row = { readonly segments: readonly Segment[]; readonly indent?: number };
 
-/** An action the provider offers on a span. The host adds its own reveal and collapse actions. */
+/**
+ * An action the provider offers on a span. A left click on its label runs it; `key` is a display hint only, which the
+ * host shows beside the label and binds no key to. The host adds its own reveal and collapse actions.
+ */
 export type Action = { readonly id: string; readonly label: string; readonly key?: string };
 
 /** Renders its branch entry as the ordinary transcript does. */

@@ -164,7 +164,7 @@ export class TranscriptProjectionController {
 		return changed;
 	}
 
-	/** Run a span action. The built-in reveal and collapse actions stay local; provider errors are reported. */
+	/** Run a span action of the current projection. The built-in reveal and collapse actions stay local; provider errors are reported. */
 	dispatchAction(spanId: string, actionId: string): void {
 		if (this.disposed) return;
 		if (actionId === REVEAL_ORIGINALS_ACTION || actionId === COLLAPSE_ACTION) {
@@ -172,7 +172,7 @@ export class TranscriptProjectionController {
 			return;
 		}
 		const provider = this.source.getProvider();
-		if (provider === undefined) return;
+		if (provider === undefined || !this.holdsSpan(spanId)) return;
 		Promise.resolve()
 			.then(() => provider.onAction(spanId, actionId))
 			.catch((error: unknown) => {
@@ -181,6 +181,13 @@ export class TranscriptProjectionController {
 					`transcript projection action "${actionId}" on span "${spanId}" from "${provider.id}" failed: ${detail}`,
 				);
 			});
+	}
+
+	/** Whether the active provider's last answer holds `spanId`: a click on a span of a replaced provider is dropped. */
+	private holdsSpan(spanId: string): boolean {
+		const state = this.state;
+		if (state === undefined || state.kind !== "projected") return false;
+		return state.items.some((item) => item.kind === "span" && item.spanId === spanId);
 	}
 
 	/** Stop listening and discard every late result. */

@@ -135,7 +135,11 @@ function createHost(entries: SessionEntry[], provider: TranscriptProjectionProvi
 	return host;
 }
 
-function spanProvider(covered: string[], project = true): TranscriptProjectionProvider {
+function spanProvider(
+	covered: string[],
+	project = true,
+	onAction: TranscriptProjectionProvider["onAction"] = () => {},
+): TranscriptProjectionProvider {
 	return {
 		id: "fixture",
 		project(snapshot: TranscriptSnapshot) {
@@ -159,7 +163,7 @@ function spanProvider(covered: string[], project = true): TranscriptProjectionPr
 				],
 			};
 		},
-		onAction: () => {},
+		onAction,
 	};
 }
 
@@ -193,21 +197,25 @@ function markers(host: ProjectionHost): string[] {
 	return host.chatContainer.children.map((child: Component) => stripAnsi(child.render(80).join("\n")));
 }
 
-function clickFirstRow(span: TranscriptSpanComponent): void {
+function clickSpan(span: TranscriptSpanComponent, x: number, y: number, width = 80): void {
 	const event: TuiMouseEvent = {
 		type: "click",
 		button: "left",
-		x: 0,
-		y: 0,
+		x,
+		y,
 		screenX: 0,
 		screenY: 0,
-		width: 80,
-		height: 40,
+		width,
+		height: span.render(width).length,
 		shift: false,
 		alt: false,
 		ctrl: false,
 	};
 	span.handleMouse(event);
+}
+
+function clickFirstRow(span: TranscriptSpanComponent): void {
+	clickSpan(span, 0, 0);
 }
 
 describe("InteractiveMode transcript projection", () => {
@@ -251,6 +259,32 @@ describe("InteractiveMode transcript projection", () => {
 		expect(spans(host)).toHaveLength(1);
 		expect(lines(host.chatContainer)).toContain("first prompt");
 		expect(host.renderedMessages).toEqual(["first prompt", "first reply", "second prompt"]);
+	});
+
+	test("runs a clicked action label once and reports a failing provider action once", async () => {
+		const host = createHost(
+			BRANCH,
+			spanProvider(["e1", "e2"], true, () => {
+				throw new Error("action boom");
+			}),
+		);
+		renderSessionEntries.call(host, BRANCH);
+		await settle();
+
+		const [span] = spans(host);
+		const rendered = span!.render(80).map(stripAnsi);
+		const y = rendered.findIndex((line) => line.includes("inspect"));
+		expect(y).toBeGreaterThanOrEqual(0);
+		clickSpan(span!, rendered[y]!.indexOf("inspect"), y);
+		await settle();
+
+		// The host reports the failure through its warning path, naming the provider and the action once.
+		const warnings = lines(host.loadedResourcesContainer);
+		expect(warnings).toContain('action "inspect" on span "span-1" from "fixture"');
+		expect(warnings).toContain("failed: action boom");
+		expect(warnings.split("failed").length - 1).toBe(1);
+		// The click ran the action instead of revealing the entries the span covers.
+		expect(lines(host.chatContainer)).not.toContain("first prompt");
 	});
 
 	test("reveals every span of the transcript with the tools-expand action", async () => {

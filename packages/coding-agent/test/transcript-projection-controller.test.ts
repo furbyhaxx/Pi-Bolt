@@ -300,11 +300,41 @@ describe("TranscriptProjectionController", () => {
 			() => Promise.reject(new Error("nope")),
 		);
 		source.provider = fake.provider;
+		controller.resolve(branch("e1"));
+		await vi.advanceTimersByTimeAsync(0);
 
 		expect(() => controller.dispatchAction("s1", "retry")).not.toThrow();
 		await vi.advanceTimersByTimeAsync(0);
 		expect(warn).toHaveBeenCalledTimes(1);
 		expect(warn.mock.calls[0][0]).toContain("nope");
+	});
+
+	it("drops a provider action for a span the active provider did not project", async () => {
+		vi.useFakeTimers();
+		const { controller, source } = harness();
+		const first = fakeProvider(() => projectionOf(1, spanItem("s1", ["e1"])));
+		source.provider = first.provider;
+		controller.resolve(branch("e1"));
+		await vi.advanceTimersByTimeAsync(0);
+
+		// The replacement projects a different span, so the click on the old one has no owner.
+		const second = fakeProvider(() => projectionOf(1, spanItem("s2", ["e1"])));
+		source.provider = second.provider;
+		source.emit("provider");
+		controller.dispatchAction("s1", "retry");
+		await vi.advanceTimersByTimeAsync(0);
+		controller.resolve(branch("e1"));
+		await vi.advanceTimersByTimeAsync(0);
+		controller.dispatchAction("s1", "retry");
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(first.actions).toEqual([]);
+		expect(second.actions).toEqual([]);
+
+		// Its own span still runs.
+		controller.dispatchAction("s2", "retry");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(second.actions).toEqual([{ spanId: "s2", actionId: "retry" }]);
 	});
 
 	it("coalesces provider events into one refresh per macrotask", async () => {

@@ -3,6 +3,8 @@ import {
 	Container,
 	MouseRegion,
 	TruncatedText,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -39,6 +41,8 @@ export interface TranscriptSpanOptions {
 	renderOriginals: () => Component[];
 	/** Called after a click toggles the span, with its new reveal state, so the host can record it. */
 	onToggleRevealed?: (revealed: boolean) => void;
+	/** Called when a left click hits one of the span's action labels; a click elsewhere still toggles. */
+	onAction?: (actionId: string) => void;
 }
 
 /** Renders one projected span as a compact record in place of the entries it covers. */
@@ -48,6 +52,7 @@ export class TranscriptSpanComponent extends Container {
 	private readonly item: SpanItem;
 	private readonly renderOriginals: () => Component[];
 	private readonly onToggleRevealed: ((revealed: boolean) => void) | undefined;
+	private readonly onAction: ((actionId: string) => void) | undefined;
 	private outputPad: number;
 	private revealed: boolean;
 	private collapsedRowsLimit: number;
@@ -60,6 +65,7 @@ export class TranscriptSpanComponent extends Container {
 		this.item = item;
 		this.renderOriginals = options.renderOriginals;
 		this.onToggleRevealed = options.onToggleRevealed;
+		this.onAction = options.onAction;
 		this.outputPad = options.outputPad ?? 1;
 		this.revealed = options.revealed ?? false;
 		this.collapsedRowsLimit = options.collapsedRowsLimit ?? TRANSCRIPT_PROJECTION_LIMITS.maxRowsPerSpan;
@@ -98,7 +104,7 @@ export class TranscriptSpanComponent extends Container {
 		if (folded > 0) {
 			content.addChild(new TruncatedText(theme.fg("muted", `  ... ${folded} more rows`), this.outputPad, 0));
 		}
-		content.addChild(new TruncatedText(this.hintLine(), this.outputPad, 0));
+		content.addChild(new SpanHintLine(this.hintLabels(), this.outputPad, this.onAction));
 
 		this.addChild(
 			new MouseRegion(content, (event) => {
@@ -125,11 +131,77 @@ export class TranscriptSpanComponent extends Container {
 		return `${marker}${state} ${theme.fg("text", theme.bold(this.item.label))}`;
 	}
 
-	private hintLine(): string {
+	private hintLabels(): HintLabel[] {
 		// (The host's own action first: it is the one a narrow line must keep.)
-		const parts = [keyHint("app.tools.expand", this.revealed ? "collapse" : "reveal originals")];
-		parts.push(...this.item.actions.map(actionHint));
-		return parts.join(theme.fg("dim", " · "));
+		return [
+			{ text: keyHint("app.tools.expand", this.revealed ? "collapse" : "reveal originals") },
+			...this.item.actions.map((action) => ({ text: actionHint(action), actionId: action.id })),
+		];
+	}
+}
+
+/** One label of the hint line; only a provider action label carries the action a click runs. */
+interface HintLabel {
+	readonly text: string;
+	readonly actionId?: string;
+}
+
+/** Separates the hint line's labels. */
+const HINT_SEPARATOR = " · ";
+/** The ellipsis TruncatedText appends to a line that is too wide for it. */
+const TRUNCATION_ELLIPSIS = "...";
+
+/**
+ * The hint line, with every provider action label a click target of its own. A click on the host's own
+ * hint or on the separators reaches the span's reveal toggle, which wraps this line.
+ */
+class SpanHintLine implements Component {
+	private readonly labels: readonly HintLabel[];
+	private readonly paddingX: number;
+	private readonly onAction: ((actionId: string) => void) | undefined;
+
+	constructor(labels: readonly HintLabel[], paddingX: number, onAction: ((actionId: string) => void) | undefined) {
+		this.labels = labels;
+		this.paddingX = paddingX;
+		this.onAction = onAction;
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		return new TruncatedText(this.line(), this.paddingX, 0).render(width);
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type !== "click" || event.button !== "left" || event.y !== 0) return undefined;
+		const actionId = this.actionAt(event.x, event.width);
+		if (actionId === undefined) return undefined;
+		this.onAction?.(actionId);
+		return { handled: true };
+	}
+
+	private line(): string {
+		return this.labels.map((label) => label.text).join(theme.fg("dim", HINT_SEPARATOR));
+	}
+
+	/** The action whose label covers column `x`; text the line had no room for is not clickable. */
+	private actionAt(x: number, width: number): string | undefined {
+		const available = Math.max(1, width - this.paddingX * 2);
+		const line = this.line();
+		const shown = truncateToWidth(line, available);
+		const truncated = visibleWidth(shown) < visibleWidth(line);
+		// TruncatedText's last columns of a cut line are the ellipsis, which belongs to no label.
+		const end = this.paddingX + visibleWidth(shown) - (truncated ? visibleWidth(TRUNCATION_ELLIPSIS) : 0);
+		if (x < this.paddingX || x >= end) return undefined;
+
+		let column = this.paddingX;
+		for (const [index, label] of this.labels.entries()) {
+			if (index > 0) column += visibleWidth(HINT_SEPARATOR);
+			const labelEnd = column + visibleWidth(label.text);
+			if (label.actionId !== undefined && x >= column && x < labelEnd) return label.actionId;
+			column = labelEnd;
+		}
+		return undefined;
 	}
 }
 

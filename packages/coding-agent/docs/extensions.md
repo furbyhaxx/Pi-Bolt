@@ -1908,7 +1908,7 @@ if (typeof pi.registerTranscriptProjection !== "function") return;
 
 - Rows: at most 12 per span and 8 segments per row, with `indent` from 0 to 8.
 - Text: a segment text, a span `label` and an action `label` hold at most 240 characters; control characters are stripped.
-- Actions: at most 6 per span. Pi adds its own reveal-originals and collapse actions, hinted with the keybinding of the tools-expand action. A span shows the entries it covers on a left click or when that action expands the transcript.
+- Actions: at most 6 per span. Pi adds its own reveal-originals and collapse actions, hinted with the keybinding of the tools-expand action. A span shows the entries it covers on a left click or when that action expands the transcript; a left click on an action `label` runs that action instead, calling `onAction(spanId, actionId)`.
 - Tones: `text`, `muted`, `dim`, `accent`, `success`, `warning`, `error`, for a segment `tone` and a span `state`. The host resolves them through its theme; a segment may also set `bold`.
 - The bounds and tones are exported as `TRANSCRIPT_PROJECTION_LIMITS` and `TRANSCRIPT_TONES`.
 

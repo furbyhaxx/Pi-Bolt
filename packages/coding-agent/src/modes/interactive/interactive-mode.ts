@@ -4602,6 +4602,7 @@ export class InteractiveMode {
 				revealed: this.transcriptProjection.isRevealed(span.spanId),
 				renderOriginals: () => this.renderSpanOriginals(covered, pass),
 				onToggleRevealed: (revealed) => this.transcriptProjection.setRevealed(span.spanId, revealed),
+				onAction: (actionId) => this.transcriptProjection.dispatchAction(span.spanId, actionId),
 			}),
 		);
 	}

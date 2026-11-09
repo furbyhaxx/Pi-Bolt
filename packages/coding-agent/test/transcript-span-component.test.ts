@@ -1,5 +1,5 @@
-import { type Component, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, test } from "vitest";
+import { type Component, setKeybindings, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { SpanItem } from "../src/core/transcript-projection.ts";
 import { TranscriptSpanComponent } from "../src/modes/interactive/components/transcript-span.ts";
@@ -51,6 +51,40 @@ function expectLinesFit(component: Component, width: number): void {
 			width,
 		);
 	}
+}
+
+/** Two provider actions without keys, so a label's column is the label's own text. */
+const TWO_ACTIONS: Partial<SpanItem> = {
+	actions: [
+		{ id: "inspect", label: "Inspect record" },
+		{ id: "open", label: "Open in context" },
+	],
+};
+
+/** The rendered hint line of a span, trimmed, and the row a click there reaches. */
+function hintLine(component: Component, width: number): { text: string; y: number } {
+	const lines = component.render(width).map(stripAnsi);
+	// The hint is the line with the host's own expand hint; a revealed span puts entries beneath it.
+	const y = lines.findIndex((line) => line.includes("reveal originals") || line.includes("collapse"));
+	expect(y, `no hint line at width ${width}: ${lines.join("/")}`).toBeGreaterThanOrEqual(0);
+	return { text: lines[y]!.trimEnd(), y };
+}
+
+function click(component: Component, x: number, y: number, width: number): void {
+	const event: TuiMouseEvent = {
+		type: "click",
+		button: "left",
+		x,
+		y,
+		screenX: 0,
+		screenY: 0,
+		width,
+		height: component.render(width).length,
+		shift: false,
+		alt: false,
+		ctrl: false,
+	};
+	component.handleMouse?.(event);
 }
 
 describe("TranscriptSpanComponent", () => {
@@ -201,5 +235,78 @@ describe("TranscriptSpanComponent", () => {
 		const revealed = text(component, 80);
 		expect(revealed).toContain("row 4");
 		expect(revealed).not.toContain("more rows");
+	});
+
+	test("runs the clicked action label without toggling the span", () => {
+		for (const width of [140, 80]) {
+			const onAction = vi.fn<(actionId: string) => void>();
+			const onToggleRevealed = vi.fn<(revealed: boolean) => void>();
+			const component = new TranscriptSpanComponent(spanItem(TWO_ACTIONS), {
+				renderOriginals: () => [originalComponent("original user prompt")],
+				onAction,
+				onToggleRevealed,
+			});
+			const hint = hintLine(component, width);
+			expect(hint.text).toContain("Inspect record");
+			expect(hint.text).toContain("Open in context");
+
+			click(component, hint.text.indexOf("Open in context"), hint.y, width);
+			expect(onAction.mock.calls).toEqual([["open"]]);
+
+			click(component, hint.text.indexOf("Inspect record"), hint.y, width);
+			expect(onAction.mock.calls).toEqual([["open"], ["inspect"]]);
+
+			expect(onToggleRevealed).not.toHaveBeenCalled();
+			expect(text(component, width)).not.toContain("original user prompt");
+		}
+	});
+
+	test("toggles the span from a row or from the host's own hint label, running no action", () => {
+		const onAction = vi.fn<(actionId: string) => void>();
+		const onToggleRevealed = vi.fn<(revealed: boolean) => void>();
+		const component = new TranscriptSpanComponent(spanItem(TWO_ACTIONS), {
+			renderOriginals: () => [],
+			onAction,
+			onToggleRevealed,
+		});
+
+		click(component, 2, 1, 80);
+		expect(onToggleRevealed.mock.calls).toEqual([[true]]);
+
+		const hint = hintLine(component, 80);
+		expect(hint.text).toContain("collapse");
+		click(component, hint.text.indexOf("collapse"), hint.y, 80);
+		expect(onToggleRevealed.mock.calls).toEqual([[true], [false]]);
+
+		// Right of the last label: nothing to run, and the span still toggles as it always did.
+		const collapsed = hintLine(component, 80);
+		click(component, collapsed.text.length, collapsed.y, 80);
+		expect(onToggleRevealed.mock.calls).toEqual([[true], [false], [true]]);
+		expect(onAction).not.toHaveBeenCalled();
+	});
+
+	test("only the visible part of a truncated label runs the action", () => {
+		const onAction = vi.fn<(actionId: string) => void>();
+		const component = new TranscriptSpanComponent(spanItem(TWO_ACTIONS), {
+			renderOriginals: () => [],
+			onAction,
+		});
+
+		const hint = hintLine(component, 36);
+		expect(hint.text).not.toContain("Inspect record");
+		expect(hint.text).not.toContain("Open in context");
+		expect(hint.text.endsWith("...")).toBe(true);
+
+		const ellipsis = hint.text.indexOf("...");
+		// Inside the label's range, but at columns the line had no room for.
+		click(component, ellipsis, hint.y, 36);
+		click(component, 35, hint.y, 36);
+		expect(onAction).not.toHaveBeenCalled();
+
+		// The clicks above toggled that span, so the visible part is tried on a fresh one.
+		const other = new TranscriptSpanComponent(spanItem(TWO_ACTIONS), { renderOriginals: () => [], onAction });
+		const otherHint = hintLine(other, 36);
+		click(other, otherHint.text.indexOf("Inspe"), otherHint.y, 36);
+		expect(onAction.mock.calls).toEqual([["inspect"]]);
 	});
 });
