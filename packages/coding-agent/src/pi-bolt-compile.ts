@@ -53,6 +53,7 @@ import {
 	piBoltPackageManager,
 	piBoltReleasePlatform,
 } from "./pi-bolt.ts";
+import { forkBuildCompilePaths } from "./pi-bolt-fork-build.ts";
 
 /** What `pi-bolt compile` was asked for, kept in <install>/compile.json for the next update. */
 export interface CompileSelection {
@@ -2230,6 +2231,9 @@ export async function runPiBoltCompile(args: string[], installAgain: () => Promi
 				),
 			);
 		}
+		// (A fork build builds with its own kit and runtime unless --kit and --runtime name others: the release's kit would
+		// build upstream's Pi, without the fork's patches, pi-bolt-fork-build.ts.)
+		if (!options.list) Object.assign(options, forkBuildCompilePaths(options));
 		await compile(options, record);
 		return 0;
 	} catch (error) {

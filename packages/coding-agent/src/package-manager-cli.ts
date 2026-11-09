@@ -55,6 +55,7 @@ import {
 	setPiBoltChannel,
 } from "./pi-bolt.ts";
 import { piBoltCompileWanted, runPiBoltCompile } from "./pi-bolt-compile.ts";
+import { forkBuildFolder, readForkBuild, runForkBuildUpdate } from "./pi-bolt-fork-build.ts";
 import { fetchReleaseInstaller, type ReleaseInstaller, runReleaseInstaller } from "./pi-bolt-installer.ts";
 import { rollbackPiBolt } from "./pi-bolt-rollback.ts";
 import { isInProfile, updatePiBoltWindows } from "./pi-bolt-update-windows.ts";
@@ -325,6 +326,8 @@ interface PackageCommandOptions {
 	invalidArgument?: string;
 	missingOptionValue?: string;
 	conflictingOptions?: string;
+	/** Pi-Bolt: update to upstream's release even in a fork build (`--upstream`). */
+	upstream: boolean;
 	/** Pi-Bolt: the release channel to switch to (`--channel`). */
 	channel?: PiBoltChannel;
 }
@@ -429,7 +432,8 @@ Options:
 			? `
   --channel stable|beta   Take the latest release (stable, the default) or the newest, pre-releases included (beta),
                           from now on
-  --rollback              Go back to the build the last update replaced (again: forward again)`
+  --rollback              Go back to the build the last update replaced (again: forward again)
+  --upstream              Install upstream's release even in a fork build (its patches are lost)`
 			: ""
   }
 
@@ -484,6 +488,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 	let allFlag = false;
 	let extensionFlagSource: string | undefined;
 	let rollbackFlag = false;
+	let upstreamFlag = false;
 	let channel: PiBoltChannel | undefined;
 
 	for (let index = 0; index < rest.length; index++) {
@@ -567,6 +572,15 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 		if (arg === "--rollback") {
 			if (command === "update" && PIBOLT) {
 				rollbackFlag = true;
+			} else {
+				invalidOption = invalidOption ?? arg;
+			}
+			continue;
+		}
+
+		if (arg === "--upstream") {
+			if (command === "update" && PIBOLT) {
+				upstreamFlag = true;
 			} else {
 				invalidOption = invalidOption ?? arg;
 			}
@@ -687,6 +701,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 		source,
 		updateTarget,
 		channel,
+		upstream: upstreamFlag,
 		showExtensionsSkippedNote,
 		local,
 		piBolt,
@@ -1411,6 +1426,21 @@ export async function handlePackageCommand(
 					);
 					// A configured command is explicit user intent, so it replaces the managed install path too.
 					const managedInstallRoot = configuredSelfUpdateArgv ? undefined : getActiveManagedInstallRoot();
+					// Pi-Bolt: a fork build updates through its own command, which merges upstream and keeps its patches
+					// (pi-bolt-fork-build.ts). Outside this build's folder, or with a command of the user's own, nothing changes.
+					if (options.upstream) {
+						console.error(
+							chalk.yellow(
+								"Warning: --upstream installs upstream's release over a fork build: the fork patches are gone until it is rebuilt.",
+							),
+						);
+					} else if (!managedInstallRoot && !configuredSelfUpdateArgv) {
+						const forkBuild = readForkBuild(forkBuildFolder());
+						if (forkBuild) {
+							process.exitCode = await runForkBuildUpdate(forkBuild);
+							return true;
+						}
+					}
 					if (managedInstallRoot && options.force) {
 						console.error(
 							chalk.red(

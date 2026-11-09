@@ -203,6 +203,10 @@
         {
           "title": "Message Types",
           "path": "message-types.md"
+        },
+        {
+          "title": "Fork Builds",
+          "path": "fork-build.md"
         }
       ]
     }

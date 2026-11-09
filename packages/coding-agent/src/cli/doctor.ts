@@ -42,6 +42,7 @@ import {
 	piBoltPackageManager,
 	piBoltUpdateCommand,
 } from "../pi-bolt.ts";
+import { forkBuildText } from "../pi-bolt-fork-build.ts";
 import { findExecutableOnPath, spawnProcessSync } from "../utils/child-process.ts";
 import { getLatestPiRelease, isNewerPackageVersion } from "../utils/version-check.ts";
 
@@ -171,6 +172,8 @@ function buildSection(self: SelfInfo, report: DoctorReport): DoctorSection {
 	const rows: DoctorSection["rows"] = [];
 	rows.push(["Pi-Bolt", build ? `${build.version} (Pi ${VERSION})` : `not a Pi-Bolt build (Pi ${VERSION})`]);
 	rows.push(["build", `${process.platform}-${build?.variant ?? arch()}, JIT ${build?.jit ? "on" : "off"}`]);
+	const forkBuild = forkBuildText(self.folder);
+	if (forkBuild) rows.push(["fork build", forkBuild]);
 	const revision = (globalThis as { Bun?: { revision?: string } }).Bun?.revision;
 	// Pi-Bolt's engine is Bun 1.4.3 with 1.4.4's TLS fix (oven-sh/bun#46300: blocked keys, NSS 3.131.1 roots) in its patch
 	// series, so a check of the version number alone reads it as unpatched (#228).

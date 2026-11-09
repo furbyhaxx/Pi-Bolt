@@ -92,6 +92,7 @@ import {
 	handlePackageCommand,
 } from "./package-manager-cli.ts";
 import { PIBOLT } from "./pi-bolt.ts";
+import { forkBuildText } from "./pi-bolt-fork-build.ts";
 import { loadRemoteControl } from "./remote-control/remote-control.lazy.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { createInterface } from "./utils/readline.ts";
@@ -720,6 +721,8 @@ export async function main(args: string[], options?: MainOptions) {
 				? `${VERSION} (Pi-Bolt ${PIBOLT.version}, ${process.platform}-${PIBOLT.variant}, JIT ${PIBOLT.jit ? "on" : "off"})`
 				: VERSION,
 		);
+		const forkBuild = forkBuildText();
+		if (forkBuild) console.log(`fork build: ${forkBuild}`);
 		process.exit(0);
 	}
 

@@ -130,6 +130,7 @@ import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { addMcpServerConfig, loadMcpConfig } from "../../extensions/mcp/config.ts";
 import { PIBOLT, PIBOLT_RELEASES_URL, piBoltUpdateCommand } from "../../pi-bolt.ts";
+import { forkBuildUpdateHint } from "../../pi-bolt-fork-build.ts";
 import type { RemoteControlController } from "../../remote-control/controller.ts";
 import { loadRemoteControl } from "../../remote-control/remote-control.lazy.ts";
 import {
@@ -5227,11 +5228,18 @@ export class InteractiveMode {
 			return theme.fg("muted", "Changelog: ") + changelogLink;
 		};
 		const note = release.note?.trim();
+		// (A fork build's updates come from its own command, which keeps its patches, pi-bolt-fork-build.ts.)
+		const forkHint = forkBuildUpdateHint();
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
 		this.chatContainer.addChild(
-			new ThemedText(() => `${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction()}`, 1, 0),
+			new ThemedText(
+				() =>
+					`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction()}${forkHint ? `\n${theme.fg("muted", forkHint)}` : ""}`,
+				1,
+				0,
+			),
 		);
 		if (note) {
 			this.chatContainer.addChild(new Spacer(1));
