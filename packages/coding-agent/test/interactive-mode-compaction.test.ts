@@ -87,7 +87,10 @@ describe("InteractiveMode compaction events", () => {
 				usage: previousUsage,
 			},
 		];
-		const fakeThis = { renderSessionItems: vi.fn() };
+		const fakeThis = {
+			renderSessionItems: vi.fn(),
+			transcriptProjection: { resolve: () => ({ mode: "raw" as const }) },
+		};
 		const renderSessionEntries = Reflect.get(InteractiveMode.prototype, "renderSessionEntries") as (
 			this: typeof fakeThis,
 			entries: SessionEntry[],
@@ -188,7 +191,7 @@ describe("InteractiveMode compaction events", () => {
 		});
 
 		expect(fakeThis.chatContainer.clear).toHaveBeenCalledTimes(1);
-		expect(fakeThis.renderSessionEntries).toHaveBeenCalledWith([previousCompaction]);
+		expect(fakeThis.renderSessionEntries).toHaveBeenCalledWith([previousCompaction], { project: false });
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(
 			expect.objectContaining({

@@ -125,6 +125,7 @@ import { getSourcePackageKey, type SourceInfo } from "../../core/source-info.ts"
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import { withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
+import type { ResolvedItem, SpanItem } from "../../core/transcript-projection.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { addMcpServerConfig, loadMcpConfig } from "../../extensions/mcp/config.ts";
@@ -195,6 +196,7 @@ import { ThemedText } from "./components/themed-text.ts";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TranscriptContainer } from "./components/transcript-container.ts";
+import { TranscriptSpanComponent } from "./components/transcript-span.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -221,6 +223,7 @@ import {
 	theme,
 } from "./theme/theme.ts";
 import { InteractiveThemeController } from "./theme/theme-controller.ts";
+import { TranscriptProjectionController, type TranscriptProjectionSource } from "./transcript-projection-controller.ts";
 import { createInteractiveTui, createInteractiveTuiReference } from "./tui-renderer.ts";
 
 export { createInteractiveTui, createInteractiveTuiReference } from "./tui-renderer.ts";
@@ -298,6 +301,33 @@ type CompactionCostNotice = {
 };
 
 type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" | "usage" }> | CompactionCostNotice;
+
+/** The state one pass of the transcript item loop carries: tool pairing, derived caches and render options. */
+interface TranscriptRenderPass {
+	readonly renderedPendingTools: Map<string, ToolExecutionComponent>;
+	readonly rowsCompactable: (toolName: string) => boolean;
+	readonly cacheMisses: Map<AssistantMessage, CacheMiss>;
+	readonly messageMeta: Map<AgentMessage, { id: string; timestamp: string }> | undefined;
+	readonly options: { updateFooter?: boolean; populateHistory?: boolean };
+}
+
+/** The transcript items of one entry: its context messages, its own entry, or a cost notice after a summary. */
+function entryRenderItems(
+	entry: SessionEntry,
+	messageMeta: Map<AgentMessage, { id: string; timestamp: string }>,
+): RenderSessionItem[] {
+	if (entry.type === "custom" || (entry.type === "usage" && entry.kind === "cache_warm")) {
+		return [entry];
+	}
+	const messages = sessionEntryToContextMessages(entry);
+	for (const msg of messages) {
+		messageMeta.set(msg, { id: entry.id, timestamp: entry.timestamp });
+	}
+	if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage && messages.length > 0) {
+		return [...messages, { type: "compaction_cost", kind: entry.type, usage: entry.usage }];
+	}
+	return messages;
+}
 
 function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionEntry, { type: "custom" }> {
 	return "type" in item && item.type === "custom";
@@ -546,6 +576,12 @@ export class InteractiveMode {
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
+
+	// Transcript projection: one controller per extension runner, its host-owned reveal state, and a refresh
+	// that waited for a running stream to end.
+	private transcriptProjectionController: TranscriptProjectionController | undefined;
+	private transcriptProjectionRunner: ExtensionRunner | undefined;
+	private transcriptProjectionRefreshPending = false;
 
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
@@ -2712,6 +2748,8 @@ export class InteractiveMode {
 	}
 
 	private resetExtensionUI(): void {
+		// The runner of the extensions this resets is invalidated next; nothing of them outlives it.
+		this.disposeTranscriptProjection();
 		if (this.extensionDialogs.length > 0) {
 			for (const dialog of this.extensionDialogs) {
 				dialog.component.dispose?.();
@@ -3793,7 +3831,12 @@ export class InteractiveMode {
 					const compactionIndex = branch.findIndex((entry) => entry.id === event.entry.id);
 					const entriesAfterCompaction = new Set(branch.slice(compactionIndex + 1).map((entry) => entry.id));
 					const retainedEntries = entries.slice(1);
-					this.renderSessionEntries(retainedEntries.filter((entry) => !entriesAfterCompaction.has(entry.id)));
+					this.renderSessionEntries(
+						retainedEntries.filter((entry) => !entriesAfterCompaction.has(entry.id)),
+						{
+							project: false,
+						},
+					);
 					this.addMessageToChat(
 						createCompactionSummaryMessage(event.entry.summary, event.entry.tokensBefore, event.entry.timestamp),
 					);
@@ -3804,7 +3847,12 @@ export class InteractiveMode {
 							usage: event.entry.usage,
 						});
 					}
-					this.renderSessionEntries(retainedEntries.filter((entry) => entriesAfterCompaction.has(entry.id)));
+					this.renderSessionEntries(
+						retainedEntries.filter((entry) => entriesAfterCompaction.has(entry.id)),
+						{
+							project: false,
+						},
+					);
 					for (const entryId of entriesAfterCompaction) this.entriesRenderedByBoundaryCompaction.add(entryId);
 					this.footer.invalidate();
 					this.ui.requestRender();
@@ -4000,6 +4048,7 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.pendingTools.clear();
+				if (this.transcriptProjectionRefreshPending) this.refreshTranscriptProjection();
 
 				this.ui.requestRender();
 				this.idleCollector?.schedule();
@@ -4052,7 +4101,7 @@ export class InteractiveMode {
 					}
 					this.chatContainer.clear();
 					// The latest compaction is prepended for model context; append it below at its chronological position.
-					this.renderSessionEntries(entries.slice(1));
+					this.renderSessionEntries(entries.slice(1), { project: false });
 					this.addMessageToChat(
 						createCompactionSummaryMessage(
 							event.result.summary,
@@ -4356,7 +4405,23 @@ export class InteractiveMode {
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		this.pendingTools.clear();
-		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
+		const pass = this.createRenderPass(messageMeta, options);
+		if (options.updateFooter) {
+			this.footer.invalidate();
+			this.updateEditorBorderColor();
+		}
+		for (const item of items) {
+			this.renderSessionItem(item, pass);
+		}
+		this.keepPendingTools(pass);
+		this.ui.requestRender();
+	}
+
+	/** Per pass: which tool rows may compact, and the cache misses to show after the messages that paid for them. */
+	private createRenderPass(
+		messageMeta: Map<AgentMessage, { id: string; timestamp: string }> | undefined,
+		options: { updateFooter?: boolean; populateHistory?: boolean },
+	): TranscriptRenderPass {
 		// (By tool name, for this transcript: a resumed session has a row per call.)
 		const compactableRows = new Map<string, boolean>();
 		const rowsCompactable = (toolName: string) => {
@@ -4372,97 +4437,97 @@ export class InteractiveMode {
 		const cacheMisses = this.settingsManager.getShowCacheMissNotices()
 			? collectCacheMisses(this.sessionManager.getEntries(), this.session.modelRuntime)
 			: new Map<AssistantMessage, CacheMiss>();
+		return { renderedPendingTools: new Map(), rowsCompactable, cacheMisses, messageMeta, options };
+	}
 
-		if (options.updateFooter) {
-			this.footer.invalidate();
-			this.updateEditorBorderColor();
+	/** Render one item of a transcript pass into `this.chatContainer`. */
+	private renderSessionItem(item: RenderSessionItem, pass: TranscriptRenderPass): void {
+		if (isCustomSessionEntry(item)) {
+			this.addCustomEntryToChat(item);
+			return;
+		}
+		if (isUsageSessionEntry(item)) {
+			this.addCacheWarmingUsage(item);
+			return;
+		}
+		if (isCompactionCostNotice(item)) {
+			this.addCompactionCostNotice(item);
+			return;
 		}
 
-		for (const item of items) {
-			if (isCustomSessionEntry(item)) {
-				this.addCustomEntryToChat(item);
-				continue;
-			}
-			if (isUsageSessionEntry(item)) {
-				this.addCacheWarmingUsage(item);
-				continue;
-			}
-			if (isCompactionCostNotice(item)) {
-				this.addCompactionCostNotice(item);
-				continue;
-			}
+		const message = item;
+		const messageMeta = pass.messageMeta;
+		// Assistant messages need special handling for tool calls
+		if (message.role === "assistant") {
+			const meta = messageMeta?.get(message);
+			this.addMessageToChat(message, {
+				messageId: meta?.id,
+				timestamp: meta?.timestamp,
+			});
+			// Render tool call components
+			for (const content of message.content) {
+				if (content.type === "toolCall") {
+					const component = new ToolExecutionComponent(
+						content.name,
+						content.id,
+						content.arguments,
+						{
+							showImages: this.settingsManager.getShowImages(),
+							imageWidthCells: this.settingsManager.getImageWidthCells(),
+							outputPad: this.outputPad,
+							compactable: pass.rowsCompactable(content.name),
+						},
+						this.getRegisteredToolDefinition(content.name),
+						this.ui,
+						this.sessionManager.getCwd(),
+					);
+					component.setExpanded(this.toolOutputExpanded);
+					this.chatContainer.addChild(component);
 
-			const message = item;
-			// Assistant messages need special handling for tool calls
-			if (message.role === "assistant") {
-				const meta = messageMeta?.get(message);
-				this.addMessageToChat(message, {
-					messageId: meta?.id,
-					timestamp: meta?.timestamp,
-				});
-				// Render tool call components
-				for (const content of message.content) {
-					if (content.type === "toolCall") {
-						const component = new ToolExecutionComponent(
-							content.name,
-							content.id,
-							content.arguments,
-							{
-								showImages: this.settingsManager.getShowImages(),
-								imageWidthCells: this.settingsManager.getImageWidthCells(),
-								outputPad: this.outputPad,
-								compactable: rowsCompactable(content.name),
-							},
-							this.getRegisteredToolDefinition(content.name),
-							this.ui,
-							this.sessionManager.getCwd(),
-						);
-						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
-
-						if (message.stopReason === "aborted" || message.stopReason === "error") {
-							let errorMessage: string;
-							if (message.stopReason === "aborted") {
-								const retryAttempt = this.session.retryAttempt;
-								errorMessage =
-									retryAttempt > 0
-										? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-										: "Operation aborted";
-							} else {
-								errorMessage = message.errorMessage || "Error";
-							}
-							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+					if (message.stopReason === "aborted" || message.stopReason === "error") {
+						let errorMessage: string;
+						if (message.stopReason === "aborted") {
+							const retryAttempt = this.session.retryAttempt;
+							errorMessage =
+								retryAttempt > 0
+									? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
+									: "Operation aborted";
 						} else {
-							renderedPendingTools.set(content.id, component);
+							errorMessage = message.errorMessage || "Error";
 						}
+						component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+					} else {
+						pass.renderedPendingTools.set(content.id, component);
 					}
 				}
-				if (message.stopReason !== "aborted" && message.stopReason !== "error") {
-					const miss = cacheMisses.get(message);
-					if (miss) this.addCacheMissNotice(miss);
-				}
-			} else if (message.role === "toolResult") {
-				// Match tool results to pending tool components
-				const component = renderedPendingTools.get(message.toolCallId);
-				if (component) {
-					component.updateResult(message);
-					renderedPendingTools.delete(message.toolCallId);
-				}
-			} else {
-				// All other messages use standard rendering
-				const meta = messageMeta?.get(message);
-				this.addMessageToChat(message, {
-					...options,
-					messageId: meta?.id,
-					timestamp: meta?.timestamp,
-				});
 			}
+			if (message.stopReason !== "aborted" && message.stopReason !== "error") {
+				const miss = pass.cacheMisses.get(message);
+				if (miss) this.addCacheMissNotice(miss);
+			}
+		} else if (message.role === "toolResult") {
+			// Match tool results to pending tool components
+			const component = pass.renderedPendingTools.get(message.toolCallId);
+			if (component) {
+				component.updateResult(message);
+				pass.renderedPendingTools.delete(message.toolCallId);
+			}
+		} else {
+			// All other messages use standard rendering
+			const meta = messageMeta?.get(message);
+			this.addMessageToChat(message, {
+				...pass.options,
+				messageId: meta?.id,
+				timestamp: meta?.timestamp,
+			});
 		}
+	}
 
-		for (const [toolCallId, component] of renderedPendingTools) {
+	/** A tool call without its result yet stays updatable by the live tool events. */
+	private keepPendingTools(pass: TranscriptRenderPass): void {
+		for (const [toolCallId, component] of pass.renderedPendingTools) {
 			this.pendingTools.set(toolCallId, component);
 		}
-		this.ui.requestRender();
 	}
 
 	/**
@@ -4470,28 +4535,147 @@ export class InteractiveMode {
 	 * @param entries Compaction-aware session entries to render
 	 * @param options.updateFooter Update footer state
 	 * @param options.populateHistory Add user messages to editor history
+	 * @param options.project Render the branch's transcript projection; false for a partial render of the branch
 	 */
 	private renderSessionEntries(
 		entries: SessionEntry[],
-		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
+		options: { updateFooter?: boolean; populateHistory?: boolean; project?: boolean } = {},
 	): void {
 		// Selection coordinates point into the transcript being replaced (#9311).
 		if (this.renderer instanceof TuiAltScreen) this.renderer.resetTextSelection();
 		const messageMeta = new Map<AgentMessage, { id: string; timestamp: string }>();
-		const items = entries.flatMap((entry): RenderSessionItem[] => {
-			if (entry.type === "custom" || (entry.type === "usage" && entry.kind === "cache_warm")) {
-				return [entry];
+		const entryItems = new Map<string, RenderSessionItem[]>();
+		const items: RenderSessionItem[] = [];
+		for (const entry of entries) {
+			const rendered = entryRenderItems(entry, messageMeta);
+			entryItems.set(entry.id, rendered);
+			items.push(...rendered);
+		}
+		const renderOptions = { updateFooter: options.updateFooter, populateHistory: options.populateHistory };
+		const transcript =
+			options.project === false ? ({ mode: "raw" } as const) : this.transcriptProjection.resolve(entries);
+		if (transcript.mode === "raw") {
+			this.renderSessionItems(items, messageMeta, renderOptions);
+			return;
+		}
+		this.renderProjectedItems(transcript.items, entryItems, messageMeta, renderOptions);
+	}
+
+	/** Render a validated projection: entries as the ordinary transcript renders them, spans as compact records. */
+	private renderProjectedItems(
+		projected: readonly ResolvedItem[],
+		entryItems: ReadonlyMap<string, readonly RenderSessionItem[]>,
+		messageMeta: Map<AgentMessage, { id: string; timestamp: string }>,
+		options: { updateFooter?: boolean; populateHistory?: boolean },
+	): void {
+		this.pendingTools.clear();
+		const pass = this.createRenderPass(messageMeta, options);
+		if (options.updateFooter) {
+			this.footer.invalidate();
+			this.updateEditorBorderColor();
+		}
+		for (const item of projected) {
+			if (item.kind === "entry") {
+				for (const rendered of entryItems.get(item.entryId) ?? []) {
+					this.renderSessionItem(rendered, pass);
+				}
+				continue;
 			}
-			const messages = sessionEntryToContextMessages(entry);
-			for (const msg of messages) {
-				messageMeta.set(msg, { id: entry.id, timestamp: entry.timestamp });
+			this.addTranscriptSpan(item, entryItems, pass);
+		}
+		this.keepPendingTools(pass);
+		this.ui.requestRender();
+	}
+
+	/** Add a span in place of the entries it covers; those render lazily, and only once it is revealed. */
+	private addTranscriptSpan(
+		span: SpanItem,
+		entryItems: ReadonlyMap<string, readonly RenderSessionItem[]>,
+		pass: TranscriptRenderPass,
+	): void {
+		const covered = span.entryIds.flatMap((entryId) => entryItems.get(entryId) ?? []);
+		if (this.chatContainer.children.length > 0) this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(
+			new TranscriptSpanComponent(span, {
+				outputPad: this.outputPad,
+				revealed: this.transcriptProjection.isRevealed(span.spanId),
+				renderOriginals: () => this.renderSpanOriginals(covered, pass),
+				onToggleRevealed: (revealed) => this.transcriptProjection.setRevealed(span.spanId, revealed),
+			}),
+		);
+	}
+
+	/**
+	 * Render the entries a span covers into a detached container with the transcript's own item code: the
+	 * transcript's children and its pending tools stay untouched while they render.
+	 */
+	private renderSpanOriginals(covered: readonly RenderSessionItem[], pass: TranscriptRenderPass): Component[] {
+		const transcript = this.chatContainer;
+		const detached = new TranscriptContainer();
+		this.chatContainer = detached;
+		try {
+			const originals: TranscriptRenderPass = {
+				...pass,
+				renderedPendingTools: new Map(),
+				options: { populateHistory: false },
+			};
+			for (const item of covered) {
+				this.renderSessionItem(item, originals);
 			}
-			if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage && messages.length > 0) {
-				return [...messages, { type: "compaction_cost", kind: entry.type, usage: entry.usage }];
-			}
-			return messages;
+		} finally {
+			this.chatContainer = transcript;
+		}
+		return [...detached.children];
+	}
+
+	/**
+	 * The projection controller of the current extension runner. A reload or a session replacement swaps the runner
+	 * and with it the registrations and listeners, so the controller is made again for the new one.
+	 */
+	private get transcriptProjection(): TranscriptProjectionController {
+		const runner = this.session.extensionRunner;
+		const bound = this.transcriptProjectionController;
+		if (bound !== undefined && this.transcriptProjectionRunner === runner) return bound;
+		this.disposeTranscriptProjection();
+		const source: TranscriptProjectionSource = {
+			getProvider: () => this.session.extensionRunner.getTranscriptProjectionProvider(),
+			subscribe: (listener) => runner.onTranscriptProjectionChange(listener),
+		};
+		this.transcriptProjectionRunner = runner;
+		this.transcriptProjectionController = new TranscriptProjectionController({
+			source,
+			warn: (message) => this.showTranscriptProjectionWarning(message),
+			onRefresh: () => this.refreshTranscriptProjection(),
 		});
-		this.renderSessionItems(items, messageMeta, options);
+		return this.transcriptProjectionController;
+	}
+
+	/** Drop the controller and its subscription: its runner reports nothing more. */
+	private disposeTranscriptProjection(): void {
+		this.transcriptProjectionController?.dispose();
+		this.transcriptProjectionController = undefined;
+		this.transcriptProjectionRunner = undefined;
+		this.transcriptProjectionRefreshPending = false;
+	}
+
+	/**
+	 * Rebuild the transcript from the projection. A running stream keeps its components until it ends: a rebuild
+	 * replaces them, and the stream's events would no longer reach the transcript.
+	 */
+	private refreshTranscriptProjection(): void {
+		if (this.session.isStreaming) {
+			this.transcriptProjectionRefreshPending = true;
+			return;
+		}
+		this.transcriptProjectionRefreshPending = false;
+		this.rebuildChatFromMessages();
+	}
+
+	/** Report a projection fallback above the transcript, where a rebuild of the transcript does not drop it. */
+	private showTranscriptProjectionWarning(message: string): void {
+		this.loadedResourcesContainer.addChild(new Spacer(1));
+		this.loadedResourcesContainer.addChild(new ThemedText(() => theme.fg("warning", `Warning: ${message}`), 0, 0));
+		this.ui.requestRender();
 	}
 
 	private addCacheWarmingUsage(entry: UsageEntry): void {
@@ -4964,9 +5148,12 @@ export class InteractiveMode {
 			for (const child of container.children) {
 				if (isExpandable(child)) {
 					child.setExpanded(expanded);
+				} else if (child instanceof TranscriptSpanComponent) {
+					child.setRevealed(expanded);
 				}
 			}
 		}
+		this.transcriptProjection.revealAll(expanded);
 		this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);
 	}
 
@@ -7593,6 +7780,7 @@ export class InteractiveMode {
 		this.unsubscribeCapabilityChanges?.();
 		this.unsubscribeCapabilityChanges = undefined;
 		this.idleCollector?.dispose();
+		this.disposeTranscriptProjection();
 		if (this.transcriptCompactionTimer) clearTimeout(this.transcriptCompactionTimer);
 		if (this.unsubscribe) {
 			this.unsubscribe();

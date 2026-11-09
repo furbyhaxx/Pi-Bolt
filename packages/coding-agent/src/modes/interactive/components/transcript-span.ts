@@ -30,6 +30,8 @@ export interface TranscriptSpanOptions {
 	collapsedRowsLimit?: number;
 	/** The covered entries' own components, made when the span is revealed. */
 	renderOriginals: () => Component[];
+	/** Called after a click toggles the span, with its new reveal state, so the host can record it. */
+	onToggleRevealed?: (revealed: boolean) => void;
 }
 
 /** Renders one projected span as a compact record in place of the entries it covers. */
@@ -38,6 +40,7 @@ export class TranscriptSpanComponent extends Container {
 	readonly spanId: string;
 	private readonly item: SpanItem;
 	private readonly renderOriginals: () => Component[];
+	private readonly onToggleRevealed: ((revealed: boolean) => void) | undefined;
 	private outputPad: number;
 	private revealed: boolean;
 	private collapsedRowsLimit: number;
@@ -49,6 +52,7 @@ export class TranscriptSpanComponent extends Container {
 		this.spanId = item.spanId;
 		this.item = item;
 		this.renderOriginals = options.renderOriginals;
+		this.onToggleRevealed = options.onToggleRevealed;
 		this.outputPad = options.outputPad ?? 1;
 		this.revealed = options.revealed ?? false;
 		this.collapsedRowsLimit = options.collapsedRowsLimit ?? TRANSCRIPT_PROJECTION_LIMITS.maxRowsPerSpan;
@@ -93,6 +97,7 @@ export class TranscriptSpanComponent extends Container {
 			new MouseRegion(content, (event) => {
 				if (event.type !== "click" || event.button !== "left") return undefined;
 				this.setRevealed(!this.revealed);
+				this.onToggleRevealed?.(this.revealed);
 				return { handled: true };
 			}),
 		);

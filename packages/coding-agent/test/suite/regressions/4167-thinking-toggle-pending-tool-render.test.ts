@@ -54,7 +54,13 @@ type RenderSessionContextThis = {
 	maybeShowAssistantDiagnostics(message: AssistantMessage): void;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 	renderSessionItems: RenderSessionItems;
+	transcriptProjection: { resolve(): { mode: "raw" } };
+	createRenderPass: PrototypeMethod;
+	renderSessionItem: PrototypeMethod;
+	keepPendingTools: PrototypeMethod;
 };
+
+type PrototypeMethod = (...args: unknown[]) => unknown;
 
 type RenderSessionEntries = (
 	this: RenderSessionContextThis,
@@ -87,6 +93,13 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		maybeShowAssistantDiagnostics: vi.fn(),
 		renderSessionItems: (InteractiveMode.prototype as unknown as { renderSessionItems: RenderSessionItems })
 			.renderSessionItems,
+		transcriptProjection: { resolve: () => ({ mode: "raw" }) },
+		createRenderPass: (InteractiveMode.prototype as unknown as { createRenderPass: PrototypeMethod })
+			.createRenderPass,
+		renderSessionItem: (InteractiveMode.prototype as unknown as { renderSessionItem: PrototypeMethod })
+			.renderSessionItem,
+		keepPendingTools: (InteractiveMode.prototype as unknown as { keepPendingTools: PrototypeMethod })
+			.keepPendingTools,
 		addMessageToChat(message: AgentMessage) {
 			chatContainer.addChild(new Text(message.role, 0, 0));
 		},
