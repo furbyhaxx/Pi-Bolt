@@ -18,7 +18,11 @@ import type {
 } from "../src/core/extensions/types.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import type { TranscriptProjectionProvider } from "../src/core/transcript-projection.ts";
+import type {
+	TranscriptProjectionChange,
+	TranscriptProjectionHandle,
+	TranscriptProjectionProvider,
+} from "../src/core/transcript-projection.ts";
 import { createInMemoryModelRegistry } from "./model-runtime-test-utils.ts";
 
 describe("transcript projection providers", () => {
@@ -77,14 +81,18 @@ describe("transcript projection providers", () => {
 		const eventBus = createEventBus();
 		const first = provider("first");
 		const firstExtension = await loadExtensionFromFactory(
-			(pi) => pi.registerTranscriptProjection(first),
+			(pi) => {
+				pi.registerTranscriptProjection(first);
+			},
 			tempDir,
 			eventBus,
 			runtime,
 			"<inline:first>",
 		);
 		const secondExtension = await loadExtensionFromFactory(
-			(pi) => pi.registerTranscriptProjection(provider("second")),
+			(pi) => {
+				pi.registerTranscriptProjection(provider("second"));
+			},
 			tempDir,
 			eventBus,
 			runtime,
@@ -109,7 +117,9 @@ describe("transcript projection providers", () => {
 
 		// After binding, a registration from another extension is rejected right away.
 		await loadExtensionFromFactory(
-			(pi) => pi.registerTranscriptProjection(provider("third")),
+			(pi) => {
+				pi.registerTranscriptProjection(provider("third"));
+			},
 			tempDir,
 			eventBus,
 			runtime,
@@ -141,8 +151,10 @@ describe("transcript projection providers", () => {
 		const errors: ExtensionError[] = [];
 		runner.onError((error) => errors.push(error));
 		runner.bindCore(extensionActions, extensionContextActions);
-		const changes: Array<TranscriptProjectionProvider | undefined> = [];
-		runner.onTranscriptProjectionChange(() => changes.push(runner.getTranscriptProjectionProvider()));
+		const changes: Array<[TranscriptProjectionChange["kind"], TranscriptProjectionProvider | undefined]> = [];
+		runner.onTranscriptProjectionChange((change) =>
+			changes.push([change.kind, runner.getTranscriptProjectionProvider()]),
+		);
 
 		expect(runner.getTranscriptProjectionProvider()).toBe(first);
 
@@ -153,6 +165,84 @@ describe("transcript projection providers", () => {
 
 		runner.invalidate();
 		expect(runner.getTranscriptProjectionProvider()).toBeUndefined();
-		expect(changes).toEqual([next, undefined]);
+		expect(changes).toEqual([
+			["provider", next],
+			["provider", undefined],
+		]);
+	});
+
+	it("asks subscribers for a refresh when the active provider invalidates, and ignores replaced or unloaded handles", async () => {
+		const runtime = createExtensionRuntime();
+		const eventBus = createEventBus();
+		const first = provider("first");
+		const firstHandles: TranscriptProjectionHandle[] = [];
+		let api: ExtensionAPI | undefined;
+		const extension = await loadExtensionFromFactory(
+			(pi) => {
+				api = pi;
+				firstHandles.push(pi.registerTranscriptProjection(first));
+			},
+			tempDir,
+			eventBus,
+			runtime,
+			"<inline:owner>",
+		);
+		const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+		runner.bindCore(extensionActions, extensionContextActions);
+		const changes: TranscriptProjectionChange["kind"][] = [];
+		runner.onTranscriptProjectionChange((change) => changes.push(change.kind));
+
+		const firstHandle = firstHandles[0];
+		if (firstHandle === undefined) throw new Error("the extension did not return a handle");
+		firstHandle.invalidate();
+		expect(changes).toEqual(["invalidate"]);
+
+		// The owner replaced its own provider: the old handle asks for a refresh nobody needs.
+		if (api === undefined) throw new Error("the extension did not run");
+		const nextHandle = api.registerTranscriptProjection(provider("next"));
+		changes.length = 0;
+		firstHandle.invalidate();
+		expect(changes).toEqual([]);
+
+		// Unloaded: both handles are dead, and the provider is gone.
+		runner.invalidate();
+		changes.length = 0;
+		firstHandle.invalidate();
+		nextHandle.invalidate();
+		expect(changes).toEqual([]);
+		expect(runner.getTranscriptProjectionProvider()).toBeUndefined();
+	});
+
+	it("accepts a refresh before a runner binds and requests it once the provider is registered", async () => {
+		const runtime = createExtensionRuntime();
+		const eventBus = createEventBus();
+		const first = provider("first");
+		const handles: TranscriptProjectionHandle[] = [];
+		const extension = await loadExtensionFromFactory(
+			(pi) => {
+				const handle = pi.registerTranscriptProjection(first);
+				handles.push(handle);
+				// Before the load commits, so before the registration is even queued.
+				handle.invalidate();
+			},
+			tempDir,
+			eventBus,
+			runtime,
+			"<inline:first>",
+		);
+		const handle = handles[0];
+		if (handle === undefined) throw new Error("the extension did not return a handle");
+		handle.invalidate();
+
+		const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+		const changes: TranscriptProjectionChange["kind"][] = [];
+		runner.onTranscriptProjectionChange((change) => changes.push(change.kind));
+		runner.bindCore(extensionActions, extensionContextActions);
+
+		expect(runner.getTranscriptProjectionProvider()).toBe(first);
+		expect(changes).toEqual(["provider", "invalidate"]);
+
+		handle.invalidate();
+		expect(changes).toEqual(["provider", "invalidate", "invalidate"]);
 	});
 });

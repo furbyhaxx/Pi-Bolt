@@ -201,6 +201,8 @@ export type {
 	ToolResultEventResult,
 	TranscriptItem,
 	TranscriptProjection,
+	TranscriptProjectionChange,
+	TranscriptProjectionHandle,
 	TranscriptProjectionProvider,
 	TranscriptProjectionRegistration,
 	TranscriptProjectionValidation,

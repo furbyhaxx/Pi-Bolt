@@ -27,7 +27,7 @@ import {
 import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
-import type { TranscriptProjectionProvider } from "../transcript-projection.ts";
+import type { TranscriptProjectionHandle, TranscriptProjectionProvider } from "../transcript-projection.ts";
 import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
 import { compiledExtensionFor, firstLineOf } from "./compiled.ts";
 import { PI_MODULE_NAMES, provideModulesToFiles } from "./compiled-modules.ts";
@@ -287,6 +287,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		// Pre-bind: queue the registration so bindCore() applies it or rejects it through its error channel.
 		registerTranscriptProjection: (provider, extensionPath = "<unknown>") => {
 			runtime.pendingTranscriptProjectionRegistrations.push({ provider, extensionPath });
+			return runtime.transcriptProjections.handle(provider);
 		},
 	};
 
@@ -437,7 +438,7 @@ function createExtensionAPI(
 			extension.toolRenderers.push(resolver);
 		},
 
-		registerTranscriptProjection(provider: TranscriptProjectionProvider): void {
+		registerTranscriptProjection(provider: TranscriptProjectionProvider): TranscriptProjectionHandle {
 			assertActive();
 			if (typeof provider?.id !== "string" || provider.id.trim().length === 0) {
 				throw new Error(
@@ -449,7 +450,9 @@ function createExtensionAPI(
 					`Transcript projection provider "${provider.id}" registered by extension "${extension.path}" must define project() and onAction().`,
 				);
 			}
+			const handle = runtime.transcriptProjections.handle(provider);
 			applyRuntimeChange(() => runtime.registerTranscriptProjection(provider, extension.path));
+			return handle;
 		},
 
 		// Flag access - checks extension registered it, reads from runtime

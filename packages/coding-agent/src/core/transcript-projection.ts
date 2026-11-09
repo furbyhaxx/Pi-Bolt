@@ -87,6 +87,17 @@ export type TranscriptSnapshot = {
 	onAction(spanId: string, actionId: string): void | Promise<void>;
 }
 
+/**
+ * Returned by `pi.registerTranscriptProjection()`. `invalidate()` asks the host to call `project()` again for the
+ * current branch; it is cheap and idempotent, and a no-op after the provider went away.
+ */
+export interface TranscriptProjectionHandle {
+	invalidate(): void;
+}
+
+/** What changed: a provider was registered, replaced or removed, or the active provider asked for a refresh. */
+export type TranscriptProjectionChange = { readonly kind: "provider" | "invalidate" };
+
 /** Why the host rejected a projection and renders the ordinary transcript instead. */
 export type ProjectionRejectionReason =
 	| "invalid-projection"

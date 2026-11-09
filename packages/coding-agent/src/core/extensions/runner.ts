@@ -34,7 +34,7 @@ import {
 	type NormalizedBuildSystemPromptOptions,
 	normalizeBuildSystemPromptOptions,
 } from "../system-prompt.ts";
-import type { TranscriptProjectionProvider } from "../transcript-projection.ts";
+import type { TranscriptProjectionChange, TranscriptProjectionProvider } from "../transcript-projection.ts";
 import type { VirtualModelDefinition } from "../virtual-models.ts";
 import { extensionDisplayName, extensionOfStack, isJitRequiredMessage, withJitHint } from "./jit-hint.ts";
 import type { TranscriptProjectionRegistration } from "./transcript-projection-registry.ts";
@@ -444,7 +444,7 @@ export class ExtensionRunner {
 	private shutdownHandler: ShutdownHandler = () => {};
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
-	private readonly transcriptProjectionListeners = new Set<() => void>();
+	private readonly transcriptProjectionListeners = new Set<(change: TranscriptProjectionChange) => void>();
 	private staleMessage: string | undefined;
 	/** The mobile UI kit's views of this session (docs/mobile-ui.md), made when a mode binds its UI. */
 	private views: ViewHost | undefined;
@@ -528,8 +528,8 @@ export class ExtensionRunner {
 
 		// Providers registered during loading are applied here, in load order, so the first extension keeps
 		// the session's slot; the others get an error through the channel error listeners read.
-		this.runtime.transcriptProjections.setChangeListener(() => {
-			for (const listener of this.transcriptProjectionListeners) listener();
+		this.runtime.transcriptProjections.setChangeListener((change) => {
+			for (const listener of this.transcriptProjectionListeners) listener(change);
 		});
 		for (const registration of this.runtime.pendingTranscriptProjectionRegistrations) {
 			this.applyTranscriptProjectionRegistration(registration);
@@ -537,6 +537,7 @@ export class ExtensionRunner {
 		this.runtime.pendingTranscriptProjectionRegistrations = [];
 		this.runtime.registerTranscriptProjection = (provider, extensionPath = "<unknown>") => {
 			this.applyTranscriptProjectionRegistration({ provider, extensionPath });
+			return this.runtime.transcriptProjections.handle(provider);
 		};
 
 		// Flush provider registrations queued during extension loading
@@ -1113,8 +1114,11 @@ export class ExtensionRunner {
 		return this.runtime.transcriptProjections.get();
 	}
 
-	/** Call `listener` when the session's transcript projection provider changes or goes away. */
-	onTranscriptProjectionChange(listener: () => void): () => void {
+	/**
+	 * Call `listener` when the session's transcript projection provider is registered, replaced or removed, or when the
+	 * active provider asked for a refresh. A refresh needs `project()` for the current branch again, so coalesce calls.
+	 */
+	onTranscriptProjectionChange(listener: (change: TranscriptProjectionChange) => void): () => void {
 		this.transcriptProjectionListeners.add(listener);
 		return () => this.transcriptProjectionListeners.delete(listener);
 	}

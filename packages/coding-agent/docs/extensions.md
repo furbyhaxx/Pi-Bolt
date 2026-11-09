@@ -1862,7 +1862,7 @@ pi.appendEntry("status-card", { title: "Indexed files", count: 17 });
 Draw the active branch of the interactive transcript from your own rows instead of Pi's rendering of the raw entries. Pi keeps layout, scrolling, focus, streaming and expansion; the provider only says how the branch is presented, so rows are plain data, never ANSI or components.
 
 ```typescript
-pi.registerTranscriptProjection({
+const projection = pi.registerTranscriptProjection({
   id: "my-grouping",
   project(snapshot) {
     // Return undefined to keep the ordinary transcript.
@@ -1872,9 +1872,14 @@ pi.registerTranscriptProjection({
     // Called for the actions Pi draws on a span, apart from its built-in reveal and collapse.
   },
 });
+
+// Something changed on your side; ask Pi to project the branch again.
+projection.invalidate();
 ```
 
 **One provider per session.** The first extension to register keeps the slot. A later registration from another extension is rejected, reported as an extension error, and the first provider stays; the owning extension may register again to replace its own provider. Register during load or later, for example in `session_start`. The provider goes away when its extension reloads or the session is replaced.
+
+**Refreshing.** `invalidate()` is the only way to tell Pi that your projection changed, for example when a task finished and its entries should now fold into a span: nothing else makes Pi call `project()` again for the current branch. It is cheap and idempotent, and a no-op after your provider was replaced, your extension reloaded or the session replaced. A call made before Pi bound the extension is delivered once the provider is registered, so it is not lost. Hosts coalesce calls: ask for a refresh as often as your state changes, and project from the state you hold when `project()` runs.
 
 **Feature detection.** Older hosts have no such method. Check before calling it and keep today's behavior otherwise:
 

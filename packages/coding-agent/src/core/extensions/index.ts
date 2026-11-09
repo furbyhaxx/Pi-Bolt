@@ -17,6 +17,8 @@ export type {
 	Tone,
 	TranscriptItem,
 	TranscriptProjection,
+	TranscriptProjectionChange,
+	TranscriptProjectionHandle,
 	TranscriptProjectionProvider,
 	TranscriptProjectionValidation,
 	TranscriptSnapshot,

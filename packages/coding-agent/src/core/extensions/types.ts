@@ -111,7 +111,7 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../tools/index.ts";
-import type { TranscriptProjectionProvider } from "../transcript-projection.ts";
+import type { TranscriptProjectionHandle, TranscriptProjectionProvider } from "../transcript-projection.ts";
 import type { ModelRoute, ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
 import type {
 	TranscriptProjectionRegistration,
@@ -1803,10 +1803,11 @@ export interface ExtensionAPI {
 	/**
 	 * Register the session's transcript projection provider: the interactive transcript then draws spans of the active
 	 * branch as your rows instead of the raw entries. One session renders one provider; a later registration from
-	 * another extension is rejected and reported as an extension error. See the `pi.registerTranscriptProjection()`
-	 * section of docs/extensions.md.
+	 * another extension is rejected and reported as an extension error. Returns a handle whose `invalidate()` asks the
+	 * host to call `project()` again for the current branch. See the `pi.registerTranscriptProjection()` section of
+	 * docs/extensions.md.
 	 */
-	registerTranscriptProjection(provider: TranscriptProjectionProvider): void;
+	registerTranscriptProjection(provider: TranscriptProjectionProvider): TranscriptProjectionHandle;
 
 	// =========================================================================
 	// Actions
@@ -2262,12 +2263,15 @@ export interface ExtensionRuntimeState {
 	registerNativeProvider: (provider: Provider, extensionPath?: string) => void;
 	unregisterProvider: (name: string, extensionPath?: string) => void;
 	/**
-	 * Register the session's transcript projection provider.
+	 * Register the session's transcript projection provider and return its handle.
 	 *
 	 * Before a runner binds: queues the registration, which the runner then applies or rejects.
 	 * After a runner binds: applies it, reporting a rejection through the runner's error channel.
 	 */
-	registerTranscriptProjection: (provider: TranscriptProjectionProvider, extensionPath?: string) => void;
+	registerTranscriptProjection: (
+		provider: TranscriptProjectionProvider,
+		extensionPath?: string,
+	) => TranscriptProjectionHandle;
 	/** Servers registered with `pi.registerMcpServer()`. */
 	mcpServers: McpServerRegistry;
 	/** The session's transcript projection provider, registered with `pi.registerTranscriptProjection()`. */
