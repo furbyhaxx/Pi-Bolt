@@ -21,7 +21,7 @@ import {
 	type ReadonlySessionManager,
 	type SessionEntry,
 } from "../session-manager.ts";
-import { completeSummarization, estimateTokens, getSummarizationFailure } from "./compaction.ts";
+import { completeSummarization, estimateTokens, getSummarizationFailure, getSummaryMaxTokens } from "./compaction.ts";
 import {
 	computeFileLists,
 	createFileOps,
@@ -363,7 +363,8 @@ export async function generateBranchSummary(
 		},
 	];
 
-	const maxTokens = Math.min(4096, model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY);
+	// Same budget as a compaction summary: a fixed 4096 cap is used up by reasoning alone.
+	const maxTokens = getSummaryMaxTokens(model, { reserveTokens });
 
 	// Call LLM for summarization. Prefer the session stream function so SDK
 	// request behavior (timeouts, retries, attribution headers) stays consistent

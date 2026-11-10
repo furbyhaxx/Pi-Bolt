@@ -81,7 +81,8 @@ describe("branch summarization", () => {
 			streamFn,
 		});
 
-		expect(requestOptions?.maxTokens).toBe(4096);
+		// 80% of the default 16384 reserve is 13107; the model's 8192 output limit is lower.
+		expect(requestOptions?.maxTokens).toBe(8192);
 		expect(requestOptions?.toolChoice).toBeUndefined();
 	});
 
