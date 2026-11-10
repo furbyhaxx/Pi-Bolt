@@ -98,7 +98,9 @@ main() {
 	require_clean
 	log "fetching upstream (${FORK_UPSTREAM%%/*}) in $FORK_ROOT"
 	git -C "$FORK_ROOT" fetch --quiet "${FORK_UPSTREAM%%/*}" || refuse "git fetch failed"
-	git -C "$FORK_ROOT" fetch --quiet "$FORK_REMOTE" || refuse "git fetch $FORK_REMOTE failed"
+	# Explicit refspec: a checkout may track only origin's mirror branch.
+	git -C "$FORK_ROOT" fetch --quiet "$FORK_REMOTE" "+refs/heads/$FORK_BRANCH:refs/remotes/$FORK_REMOTE/$FORK_BRANCH" ||
+		refuse "git fetch $FORK_REMOTE failed"
 
 	local merged="" source
 	for source in "$FORK_REMOTE/$FORK_BRANCH" "$FORK_UPSTREAM"; do
