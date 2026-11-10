@@ -5,8 +5,9 @@ kept current and rebuilt locally. No runner, no signing, no release: upstream al
 only the JavaScript layer is built here.
 
 ```
-sync.sh      git fetch upstream; merge upstream/pi-bolt into fork/carry (merge, never rebase)
-             smoke gate on the merge (the patch's tests + the type check); push fork/carry to origin
+sync.sh      git fetch upstream + origin; merge origin/fork/carry (other hosts push it) and upstream/pi-bolt
+             into fork/carry (merge, never rebase); smoke gate on the merge (the patch's tests + the type
+             check); push fork/carry to origin, also a hand-resolved merge that is not pushed yet
 rebuild.sh   runtime (reused) -> Pi's packages -> driver + kit -> `pi compile` with the installed extension list
              -> verify -> out/pi-bolt-compiled + fork-build.json (installed: nothing)
 install.sh   swap out/pi-bolt-compiled into the installation, keeping the build it replaces
@@ -36,7 +37,7 @@ line per run in `fork.log` in the same folder. A desktop notification goes out w
 
 | state | exit | meaning |
 |---|---|---|
-| `up-to-date` | 0 | `upstream/pi-bolt` is already an ancestor of `fork/carry` |
+| `up-to-date` | 0 | `upstream/pi-bolt` and `origin/fork/carry` are in `fork/carry`, and nothing is unpushed |
 | `merged` | 0 | merged and pushed (or `--no-push`) |
 | `refused` | 1 | the checkout is dirty or not on `fork/carry`; nothing was done |
 | `conflict` | 2 | the merge conflicted, and was aborted; resolve by hand |
@@ -54,7 +55,7 @@ The systemd unit fails for `conflict`, `merged-but-failing` and `failed`, so `sy
 `sync.sh` aborts the merge, writes the conflicted files into `status.json` and exits 2. Resolve it like any merge:
 
 ```
-git -C <checkout> merge upstream/pi-bolt     # the merge is not left half-done: this repeats it
+git -C <checkout> merge <source>             # the source status.json names; this repeats the aborted merge
 # fix the files, git add them
 git commit --no-edit
 scripts/fork/update.sh                        # or rebuild.sh && install.sh, if the push is not wanted

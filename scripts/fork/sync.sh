@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Brings fork/carry up to date with upstream/pi-bolt: merges (never rebases), runs the smoke gate on the merge, pushes the
-# branch to origin. A conflict is left for a human to resolve: the merge is aborted and nothing is pushed.
+# Brings fork/carry up to date with origin (other hosts push it too) and with upstream/pi-bolt: merges (never rebases),
+# runs the smoke gate on the merge, pushes the branch to origin, also when only a hand-resolved merge is waiting. A conflict is left for a human to resolve: the merge is aborted and nothing is pushed.
 #
 # Usage: sync.sh [--no-gate] [--no-push]
 #   --no-gate  merge without running the smoke gate (a machine without node_modules, or a merge-only run)
@@ -98,27 +98,37 @@ main() {
 	require_clean
 	log "fetching upstream (${FORK_UPSTREAM%%/*}) in $FORK_ROOT"
 	git -C "$FORK_ROOT" fetch --quiet "${FORK_UPSTREAM%%/*}" || refuse "git fetch failed"
+	git -C "$FORK_ROOT" fetch --quiet "$FORK_REMOTE" || refuse "git fetch $FORK_REMOTE failed"
 
-	if git -C "$FORK_ROOT" merge-base --is-ancestor "$FORK_UPSTREAM" HEAD; then
-		fork_status up-to-date "$FORK_UPSTREAM is already in $FORK_BRANCH ($(git -C "$FORK_ROOT" rev-parse --short HEAD))"
-		log "up to date: $FORK_UPSTREAM is an ancestor of $FORK_BRANCH"
-		return 0
-	fi
-
-	log "merging $FORK_UPSTREAM into $FORK_BRANCH"
-	if ! git -C "$FORK_ROOT" merge --no-edit "$FORK_UPSTREAM"; then
-		conflicts="$(git -C "$FORK_ROOT" diff --name-only --diff-filter=U)"
-		git -C "$FORK_ROOT" merge --abort 2>/dev/null || warn "git merge --abort could not undo the merge: resolve it by hand"
-		fork_status conflict "the merge of $FORK_UPSTREAM stopped on these files, and was aborted:
+	local merged="" source
+	for source in "$FORK_REMOTE/$FORK_BRANCH" "$FORK_UPSTREAM"; do
+		git -C "$FORK_ROOT" rev-parse --verify --quiet "$source" >/dev/null || continue
+		git -C "$FORK_ROOT" merge-base --is-ancestor "$source" HEAD && continue
+		log "merging $source into $FORK_BRANCH"
+		if ! git -C "$FORK_ROOT" merge --no-edit "$source"; then
+			conflicts="$(git -C "$FORK_ROOT" diff --name-only --diff-filter=U)"
+			git -C "$FORK_ROOT" merge --abort 2>/dev/null || warn "git merge --abort could not undo the merge: resolve it by hand"
+			fork_status conflict "the merge of $source stopped on these files, and was aborted:
 $conflicts
-Resolve it by hand: git merge $FORK_UPSTREAM, fix the files, commit, then scripts/fork/update.sh."
-		return 2
-	fi
+Resolve it by hand: git merge $source, fix the files, commit, then scripts/fork/update.sh."
+			return 2
+		fi
+		merged=1
+	done
 	commit="$(git -C "$FORK_ROOT" rev-parse --short HEAD)"
+
+	if [ -z "$merged" ]; then
+		if git -C "$FORK_ROOT" merge-base --is-ancestor HEAD "$FORK_REMOTE/$FORK_BRANCH" 2>/dev/null; then
+			fork_status up-to-date "$FORK_UPSTREAM and $FORK_REMOTE/$FORK_BRANCH are already in $FORK_BRANCH ($commit)"
+			log "up to date: nothing to merge or push"
+			return 0
+		fi
+		log "nothing to merge, but $FORK_BRANCH ($commit) is ahead of $FORK_REMOTE: gate and push it"
+	fi
 
 	if [ -z "$NO_GATE" ]; then
 		if ! gate_report="$(smoke_gate)"; then
-			fork_status merged-but-failing "merged $FORK_UPSTREAM into $FORK_BRANCH ($commit), and the smoke gate failed:
+			fork_status merged-but-failing "$FORK_BRANCH at $commit, and the smoke gate failed:
 $gate_report
 The merge is kept. The whole gate output: $GATE_LOG"
 			return 3
@@ -126,17 +136,17 @@ The merge is kept. The whole gate output: $GATE_LOG"
 	fi
 
 	if [ -n "$NO_PUSH" ]; then
-		fork_status merged "merged $FORK_UPSTREAM into $FORK_BRANCH ($commit); not pushed (--no-push)"
+		fork_status merged "$FORK_BRANCH at $commit; not pushed (--no-push)"
 		log "merged $commit, not pushed (--no-push)"
 		return 0
 	fi
 	log "pushing $FORK_BRANCH to $FORK_REMOTE"
 	if ! push_out="$(git -C "$FORK_ROOT" push "$FORK_REMOTE" "HEAD:refs/heads/$FORK_BRANCH" 2>&1)"; then
-		fork_status merged-not-pushed "merged $FORK_UPSTREAM into $FORK_BRANCH ($commit), but the push to $FORK_REMOTE failed:
+		fork_status merged-not-pushed "$FORK_BRANCH at $commit, but the push to $FORK_REMOTE failed:
 $push_out"
 		return 4
 	fi
-	fork_status merged "merged $FORK_UPSTREAM into $FORK_BRANCH ($commit) and pushed it to $FORK_REMOTE"
+	fork_status merged "$FORK_BRANCH at $commit, pushed to $FORK_REMOTE"
 	return 0
 }
 
